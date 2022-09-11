@@ -2,21 +2,21 @@
 // This software is released under the 2-Clause BSD license, included
 // below.
 //
-// Copyright (c) 2019, Aous Naman 
+// Copyright (c) 2019, Aous Naman
 // Copyright (c) 2019, Kakadu Software Pty Ltd, Australia
 // Copyright (c) 2019, The University of New South Wales, Australia
-// 
+//
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
-// 
+//
 // 1. Redistributions of source code must retain the above copyright
 // notice, this list of conditions and the following disclaimer.
-// 
+//
 // 2. Redistributions in binary form must reproduce the above copyright
 // notice, this list of conditions and the following disclaimer in the
 // documentation and/or other materials provided with the distribution.
-// 
+//
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
 // IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
 // TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
@@ -47,21 +47,9 @@
 #include <cstring>
 #include "grok.h"
 #include "logger.h"
-
-#ifndef _MSC_VER
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wconversion"
-#pragma GCC diagnostic ignored "-Wsign-conversion"
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#pragma GCC diagnostic ignored "-Wunused-variable"
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#pragma GCC diagnostic ignored "-Wparentheses"
-#endif
-
 #include "ojph_block_common.h"
 #include "ojph_block_decoder.h"
 #include "ojph_arch.h"
-#include "ojph_message.h"
 
 namespace ojph {
   namespace local {
@@ -72,7 +60,7 @@ namespace ojph {
      *  A number of events is decoded from the MEL bitstream ahead of time
      *  and stored in run/num_runs.
      *  Each run represents the number of zero events before a one event.
-     */ 
+     */
     struct dec_mel_st {
       dec_mel_st() : data(NULL), tmp(0), bits(0), size(0), unstuff(false),
         k(0), num_runs(0), runs(0)
@@ -92,7 +80,7 @@ namespace ojph {
 
     //************************************************************************/
     /** @brief Reads and unstuffs the MEL bitstream
-     * 
+     *
      *  This design needs more bytes in the codeblock buffer than the length
      *  of the cleanup pass by up to 2 bytes.
      *
@@ -117,7 +105,7 @@ namespace ojph {
       else if (melp->size > 0)
       { // 4 or less
         int i = 0;
-        while (melp->size > 1) {   
+        while (melp->size > 1) {
           ui32 v = *melp->data++;    // read one byte at a time
           ui32 m = ~(0xFFu << i);    // mask of location
           val = (val & m) | (v << i);// put one byte in its correct location
@@ -125,21 +113,21 @@ namespace ojph {
           i += 8;
         }
         // size equal to 1
-        ui32 v = *melp->data++;    // the one before the last is different 
+        ui32 v = *melp->data++;    // the one before the last is different
         v |= 0xF;                  // MEL and VLC segments can overlap
         ui32 m = ~(0xFFu << i);
         val = (val & m) | (v << i);
         --melp->size;
       }
-      
+
       // next we unstuff them before adding them to the buffer
       int bits = 32 - melp->unstuff; // number of bits in val, subtract 1 if
-                                     // the previously read byte requires 
+                                     // the previously read byte requires
                                      // unstuffing
 
       // data is unstuffed and accumulated in t
       // bits has the number of bits in t
-      ui32 t = val & 0xFF; 
+      ui32 t = val & 0xFF;
       bool unstuff = ((val & 0xFF) == 0xFF); // true if we need unstuffing
       bits -= unstuff; // there is one less bit in t if unstuffing is needed
       t = t << (8 - unstuff); // move up to make room for the next byte
@@ -166,14 +154,14 @@ namespace ojph {
 
     //************************************************************************/
     /** @brief Decodes unstuffed MEL segment bits stored in tmp to runs
-     * 
+     *
      *  Runs are stored in "runs" and the number of runs in "num_runs".
-     *  Each run represents a number of zero events that may or may not 
+     *  Each run represents a number of zero events that may or may not
      *  terminate in a 1 event.
      *  Each run is stored in 7 bits.  The LSB is 1 if the run terminates in
-     *  a 1 event, 0 otherwise.  The next 6 bits, for the case terminating 
-     *  with 1, contain the number of consecutive 0 zero events * 2; for the 
-     *  case terminating with 0, they store (number of consecutive 0 zero 
+     *  a 1 event, 0 otherwise.  The next 6 bits, for the case terminating
+     *  with 1, contain the number of consecutive 0 zero events * 2; for the
+     *  case terminating with 0, they store (number of consecutive 0 zero
      *  events - 1) * 2.
      *  A total of 6 bits (made up of 1 + 5) should have been enough.
      *
@@ -198,7 +186,7 @@ namespace ojph {
         int run = 0;
         if (melp->tmp & (1ull<<63)) //The next bit to decode (stored in MSB)
         { //one is found
-          run = 1 << eval;  
+          run = 1 << eval;
           run--; // consecutive runs of 0 events - 1
           melp->k = melp->k + 1 < 12 ? melp->k + 1 : 12;//increment, max is 12
           melp->tmp <<= 1; // consume one bit from tmp
@@ -216,14 +204,14 @@ namespace ojph {
         eval = melp->num_runs * 7;           // 7 bits per run
         melp->runs &= ~((ui64)0x3F << eval); // 6 bits are sufficient
         melp->runs |= ((ui64)run) << eval;   // store the value in runs
-        melp->num_runs++;                    // increment count  
+        melp->num_runs++;                    // increment count
       }
     }
 
     //************************************************************************/
     /** @brief Initiates a dec_mel_st structure for MEL decoding and reads
      *         some bytes in order to get the read address to a multiple
-     *         of 4 
+     *         of 4
      *
      *  @param [in]  melp is a pointer to dec_mel_st structure
      *  @param [in]  bbuf is a pointer to byte buffer
@@ -238,7 +226,7 @@ namespace ojph {
       melp->tmp = 0;                   //
       melp->unstuff = false;           // no unstuffing
       melp->size = scup - 1;           // size is the length of MEL+VLC-1
-      melp->k = 0;                     // 0 for state 
+      melp->k = 0;                     // 0 for state
       melp->num_runs = 0;              // num_runs is 0
       melp->runs = 0;                  //
 
@@ -256,7 +244,7 @@ namespace ojph {
         int d_bits = 8 - melp->unstuff; //if unstuffing is needed, reduce by 1
         melp->tmp = (melp->tmp << d_bits) | d; //store bits in tmp
         melp->bits += d_bits;  //increment tmp by number of bits
-        melp->unstuff = ((d & 0xFF) == 0xFF); //true of next byte needs 
+        melp->unstuff = ((d & 0xFF) == 0xFF); //true of next byte needs
                                               //unstuffing
       }
       melp->tmp <<= (64 - melp->bits); //push all the way up so the first bit
@@ -268,7 +256,7 @@ namespace ojph {
      *         MEL segment is decoded
      *
      * @param [in]  melp is a pointer to dec_mel_st structure
-     */    
+     */
     static inline
     int mel_get_run(dec_mel_st *melp)
     {
@@ -284,7 +272,7 @@ namespace ojph {
     //************************************************************************/
     /** @brief A structure for reading and unstuffing a segment that grows
      *         backward, such as VLC and MRP
-     */ 
+     */
     struct rev_struct {
       rev_struct() : data(NULL), tmp(0), bits(0), size(0), unstuff(false)
       {}
@@ -301,27 +289,27 @@ namespace ojph {
     /** @brief Read and unstuff data from a backwardly-growing segment
      *
      *  This reader can read up to 8 bytes from before the VLC segment.
-     *  Care must be taken not read from unreadable memory, causing a 
+     *  Care must be taken not read from unreadable memory, causing a
      *  segmentation fault.
-     * 
+     *
      *  Note that there is another subroutine rev_read_mrp that is slightly
      *  different.  The other one fills zeros when the buffer is exhausted.
      *  This one basically does not care if the bytes are consumed, because
      *  any extra data should not be used in the actual decoding.
      *
-     *  Unstuffing is needed to prevent sequences more than 0xFF8F from 
+     *  Unstuffing is needed to prevent sequences more than 0xFF8F from
      *  appearing in the bits stream; since we are reading backward, we keep
-     *  watch when a value larger than 0x8F appears in the bitstream. 
-     *  If the byte following this is 0x7F, we unstuff this byte (ignore the 
+     *  watch when a value larger than 0x8F appears in the bitstream.
+     *  If the byte following this is 0x7F, we unstuff this byte (ignore the
      *  MSB of that byte, which should be 0).
      *
      *  @param [in]  vlcp is a pointer to rev_struct structure
      */
-    static inline 
+    static inline
     void rev_read(rev_struct *vlcp)
     {
       //process 4 bytes at a time
-      if (vlcp->bits > 32)  // if there are more than 32 bits in tmp, then 
+      if (vlcp->bits > 32)  // if there are more than 32 bits in tmp, then
         return;             // reading 32 bits can overflow vlcp->tmp
       ui32 val = 0;
       //the next line (the if statement) needs to be tested first
@@ -335,7 +323,7 @@ namespace ojph {
       else if (vlcp->size > 0)
       { // 4 or less
         int i = 24;
-        while (vlcp->size > 0) {   
+        while (vlcp->size > 0) {
           ui32 v = *vlcp->data--; // read one byte at a time
           val |= (v << i);        // put byte in its correct location
           --vlcp->size;
@@ -370,7 +358,7 @@ namespace ojph {
     }
 
     //************************************************************************/
-    /** @brief Initiates the rev_struct structure and reads a few bytes to 
+    /** @brief Initiates the rev_struct structure and reads a few bytes to
      *         move the read address to multiple of 4
      *
      *  There is another similar rev_init_mrp subroutine.  The difference is
@@ -383,7 +371,7 @@ namespace ojph {
      *  @param [in]  lcup is the length of MagSgn+MEL+VLC segments
      *  @param [in]  scup is the length of MEL+VLC segments
      */
-    static inline 
+    static inline
     void rev_init(rev_struct *vlcp, ui8* data, int lcup, int scup)
     {
       //first byte has only the upper 4 bits
@@ -418,13 +406,13 @@ namespace ojph {
     }
 
     //************************************************************************/
-    /** @brief Retrieves 32 bits from the head of a rev_struct structure 
+    /** @brief Retrieves 32 bits from the head of a rev_struct structure
      *
      *  By the end of this call, vlcp->tmp must have no less than 33 bits
      *
      *  @param [in]  vlcp is a pointer to rev_struct structure
      */
-    static inline 
+    static inline
     ui32 rev_fetch(rev_struct *vlcp)
     {
       if (vlcp->bits < 32)  // if there are less then 32 bits, read more
@@ -442,7 +430,7 @@ namespace ojph {
      *  @param [in]  vlcp is a pointer to rev_struct structure
      *  @param [in]  num_bits is the number of bits to be removed
      */
-    static inline 
+    static inline
     ui32 rev_advance(rev_struct *vlcp, ui32 num_bits)
     {
       assert(num_bits <= vlcp->bits); // vlcp->tmp must have more than num_bits
@@ -462,7 +450,7 @@ namespace ojph {
      *
      *  @param [in]  mrp is a pointer to rev_struct structure
      */
-    static inline 
+    static inline
     void rev_read_mrp(rev_struct *mrp)
     {
       //process 4 bytes at a time
@@ -478,7 +466,7 @@ namespace ojph {
       else if (mrp->size > 0)
       {
         int i = 24;
-        while (mrp->size > 0) {   
+        while (mrp->size > 0) {
           ui32 v = *mrp->data--; // read one byte at a time
           val |= (v << i);       // put byte in its correct location
           --mrp->size;
@@ -518,7 +506,7 @@ namespace ojph {
      *         an architecture that read size must be compatible with the
      *         alignment of the read address
      *
-     *  There is another simiar subroutine rev_init.  This subroutine does 
+     *  There is another simiar subroutine rev_init.  This subroutine does
      *  NOT skip the first 12 bits, and starts with unstuff set to true.
      *
      *  @param [in]  mrp is a pointer to rev_struct structure
@@ -526,7 +514,7 @@ namespace ojph {
      *  @param [in]  lcup is the length of MagSgn+MEL+VLC segments
      *  @param [in]  len2 is the length of SPP+MRP segments
      */
-    static inline 
+    static inline
     void rev_init_mrp(rev_struct *mrp, ui8* data, int lcup, int len2)
     {
       mrp->data = data + lcup + len2 - 1;
@@ -543,7 +531,7 @@ namespace ojph {
       for (int i = 0; i < num; ++i) {
         ui64 d;
         //read a byte, 0 if no more data
-        d = (mrp->size-- > 0) ? *mrp->data-- : 0; 
+        d = (mrp->size-- > 0) ? *mrp->data-- : 0;
         //check if unstuffing is needed
         ui32 d_bits = 8 - ((mrp->unstuff && ((d & 0x7F) == 0x7F)) ? 1 : 0);
         mrp->tmp |= d << mrp->bits; // move data to vlcp->tmp
@@ -554,13 +542,13 @@ namespace ojph {
     }
 
     //************************************************************************/
-    /** @brief Retrieves 32 bits from the head of a rev_struct structure 
+    /** @brief Retrieves 32 bits from the head of a rev_struct structure
      *
      *  By the end of this call, mrp->tmp must have no less than 33 bits
      *
      *  @param [in]  mrp is a pointer to rev_struct structure
      */
-    static inline 
+    static inline
     ui32 rev_fetch_mrp(rev_struct *mrp)
     {
       if (mrp->bits < 32) // if there are less than 32 bits in mrp->tmp
@@ -578,7 +566,7 @@ namespace ojph {
      *  @param [in]  mrp is a pointer to rev_struct structure
      *  @param [in]  num_bits is the number of bits to be removed
      */
-    static inline 
+    static inline
     ui32 rev_advance_mrp(rev_struct *mrp, ui32 num_bits)
     {
       assert(num_bits <= mrp->bits); // we must not consume more than mrp->bits
@@ -588,7 +576,7 @@ namespace ojph {
     }
 
     //************************************************************************/
-    /** @brief State structure for reading and unstuffing of forward-growing 
+    /** @brief State structure for reading and unstuffing of forward-growing
      *         bitstreams; these are: MagSgn and SPP bitstreams
      */
     struct frwd_struct {
@@ -601,7 +589,7 @@ namespace ojph {
 
     //************************************************************************/
     /** @brief Read and unstuffs 32 bits from forward-growing bitstream
-     *  
+     *
      *  A template is used to accommodate a different requirement for
      *  MagSgn and SPP bitstreams; in particular, when MagSgn bitstream is
      *  consumed, 0xFF's are fed, while when SPP is exhausted 0's are fed in.
@@ -616,9 +604,9 @@ namespace ojph {
      *  @tparam       X is the value fed in when the bitstream is exhausted
      *  @param  [in]  msp is a pointer to frwd_struct structure
      *
-     */ 
+     */
     template<int X>
-    static inline 
+    static inline
     void frwd_read(frwd_struct *msp)
     {
       assert(msp->bits <= 32); // assert that there is a space for 32 bits
@@ -633,19 +621,19 @@ namespace ojph {
       {
         int i = 0;
         val = X != 0 ? 0xFFFFFFFFu : 0;
-        while (msp->size > 0) {   
+        while (msp->size > 0) {
           ui32 v = *msp->data++;    // read one byte at a time
           ui32 m = ~(0xFFu << i);    // mask of location
           val = (val & m) | (v << i);// put one byte in its correct location
           --msp->size;
-          i += 8;          
+          i += 8;
         }
       }
       else
         val = X != 0 ? 0xFFFFFFFFu : 0;
 
       // we accumulate in t and keep a count of the number of bits in bits
-      ui32 bits = 8 - msp->unstuff;        
+      ui32 bits = 8 - msp->unstuff;
       ui32 t = val & 0xFF;
       bool unstuff = ((val & 0xFF) == 0xFF);  // Do we need unstuffing next?
 
@@ -667,7 +655,7 @@ namespace ojph {
 
     //************************************************************************/
     /** @brief Initialize frwd_struct struct and reads some bytes
-     *  
+     *
      *  @tparam      X is the value fed in when the bitstream is exhausted.
      *               See frwd_read regarding the template
      *  @param [in]  msp is a pointer to frwd_struct
@@ -707,7 +695,7 @@ namespace ojph {
      *  @param [in]  msp is a pointer to frwd_struct
      *  @param [in]  num_bits is the number of bit to consume
      */
-    static inline 
+    static inline
     void frwd_advance(frwd_struct *msp, ui32 num_bits)
     {
       assert(num_bits <= msp->bits);
@@ -723,7 +711,7 @@ namespace ojph {
      *  @param [in]  msp is a pointer to frwd_struct
      */
     template<int X>
-    static inline 
+    static inline
     ui32 frwd_fetch(frwd_struct *msp)
     {
       if (msp->bits < 32)
@@ -747,9 +735,9 @@ namespace ojph {
      *  @param [in]   lengths1 is the length of cleanup pass
      *  @param [in]   lengths2 is the length of refinement passes (either SPP
      *                only or SPP+MRP)
-     *  @param [in]   width is the decoded codeblock width 
+     *  @param [in]   width is the decoded codeblock width
      *  @param [in]   height is the decoded codeblock height
-     *  @param [in]   stride is the decoded codeblock buffer stride 
+     *  @param [in]   stride is the decoded codeblock buffer stride
      *  @param [in]   stripe_causal is true for stripe causal mode
      */
     bool ojph_decode_codeblock(ui8* coded_data, ui32* decoded_data,
@@ -780,15 +768,15 @@ namespace ojph {
 
       if (missing_msbs > 30) // p < 0
       {
-        if (insufficient_precision == false) 
+        if (insufficient_precision == false)
         {
           insufficient_precision = true;
-          grk::GRK_WARN( "32 bits are not enough to decode this "
+          grk::GRK_WARN("32 bits are not enough to decode this "
                                 "codeblock. This message will not be "
                                 "displayed again.\n");
         }
         return false;
-      }       
+      }
       else if (missing_msbs == 30) // p == 0
       { // not enough precision to decode and set the bin center to 1
         if (modify_code == false) {
@@ -819,7 +807,7 @@ namespace ojph {
 
       if (lengths1 < 2)
       {
-    	  grk::GRK_WARN("Wrong codeblock length.\n");
+        grk::GRK_WARN("Wrong codeblock length.\n");
         return false;
       }
 
@@ -831,16 +819,16 @@ namespace ojph {
       if (scup < 2 || scup > lcup || scup > 4079) //something is wrong
         return false;
 
-      // The temporary storage scratch holds two types of data in an 
+      // The temporary storage scratch holds two types of data in an
       // interleaved fashion. The interleaving allows us to use one
       // memory pointer.
       // We have one entry for a decoded VLC code, and one entry for UVLC.
-      // Entries are 16 bits each, corresponding to one quad, 
-      // but since we want to use XMM registers of the SSE family 
+      // Entries are 16 bits each, corresponding to one quad,
+      // but since we want to use XMM registers of the SSE family
       // of SIMD; we allocated 16 bytes or more per quad row; that is,
       // the width is no smaller than 16 bytes (or 8 entries), and the
       // height is 512 quads
-      // Each VLC entry contains, in the following order, starting 
+      // Each VLC entry contains, in the following order, starting
       // from MSB
       // e_k (4bits), e_1 (4bits), rho (4bits), useless for step 2 (4bits)
       // Each entry in UVLC contains u_q
@@ -849,17 +837,17 @@ namespace ojph {
       ui16 scratch[8 * 513] = {0};       // 8 kB
 
       // We need an extra two entries (one inf and one u_q) beyond
-      // the last column. 
-      // If the block width is 4 (2 quads), then we use sstr of 8 
-      // (enough for 4 quads). If width is 8 (4 quads) we use 
-      // sstr is 16 (enough for 8 quads). For a width of 16 (8 
+      // the last column.
+      // If the block width is 4 (2 quads), then we use sstr of 8
+      // (enough for 4 quads). If width is 8 (4 quads) we use
+      // sstr is 16 (enough for 8 quads). For a width of 16 (8
       // quads), we use 24 (enough for 12 quads).
       ui32 sstr = ((width + 2u) + 7u) & ~7u; // multiples of 8
 
       ui32 mmsbp2 = missing_msbs + 2;
 
       // The cleanup pass is decoded in two steps; in step one,
-      // the VLC and MEL segments are decoded, generating a record that 
+      // the VLC and MEL segments are decoded, generating a record that
       // has 2 bytes per quad. The 2 bytes contain, u, rho, e^1 & e^k.
       // This information should be sufficient for the next step.
       // In step 2, we decode the MagSgn segment.
@@ -896,13 +884,13 @@ namespace ojph {
           {
             run -= 2; //subtract 2, since events number if multiplied by 2
 
-            // Is the run terminated in 1? if so, use decoded VLC code, 
-            // otherwise, discard decoded data, since we will decoded again 
+            // Is the run terminated in 1? if so, use decoded VLC code,
+            // otherwise, discard decoded data, since we will decoded again
             // using a different context
             t0 = (run == -1) ? t0 : 0;
 
             // is run -1 or -2? this means a run has been consumed
-            if (run < 0) 
+            if (run < 0)
               run = mel_get_run(&mel);  // get another run
           }
           //run -= (c_q == 0) ? 2 : 0;
@@ -922,7 +910,7 @@ namespace ojph {
           ui16 t1 = 0;
 
           //decode VLC using the context c_q and the head of VLC bitstream
-          t1 = vlc_tbl0[c_q + (vlc_val & 0x7F)]; 
+          t1 = vlc_tbl0[c_q + (vlc_val & 0x7F)];
 
           // if context is zero, use one MEL event
           if (c_q == 0 && x < width) //zero context
@@ -948,7 +936,7 @@ namespace ojph {
 
           //remove data from vlc stream, if qinf is not used, cwdlen is 0
           vlc_val = rev_advance(&vlc, t1 & 0x7);
-          
+
           // decode u
           /////////////
           // uvlc_mode is made up of u_offset bits from the quad pair
@@ -971,8 +959,8 @@ namespace ojph {
           //decode uvlc_mode to get u for both quads
           ui32 uvlc_entry = uvlc_tbl0[uvlc_mode + (vlc_val & 0x3F)];
           //remove total prefix length
-          vlc_val = rev_advance(&vlc, uvlc_entry & 0x7); 
-          uvlc_entry >>= 3; 
+          vlc_val = rev_advance(&vlc, uvlc_entry & 0x7);
+          uvlc_entry >>= 3;
           //extract suffixes for quad 0 and 1
           ui32 len = uvlc_entry & 0xF;           //suffix length for 2 quads
           ui32 tmp = vlc_val & ((1 << len) - 1); //suffix value for 2 quads
@@ -1014,13 +1002,13 @@ namespace ojph {
             {
               run -= 2; //subtract 2, since events number is multiplied by 2
 
-              // Is the run terminated in 1? if so, use decoded VLC code, 
-              // otherwise, discard decoded data, since we will decoded again 
+              // Is the run terminated in 1? if so, use decoded VLC code,
+              // otherwise, discard decoded data, since we will decoded again
               // using a different context
               t0 = (run == -1) ? t0 : 0;
 
               // is run -1 or -2? this means a run has been consumed
-              if (run < 0) 
+              if (run < 0)
                 run = mel_get_run(&mel);  // get another run
             }
             //run -= (c_q == 0) ? 2 : 0;
@@ -1046,7 +1034,7 @@ namespace ojph {
             ui16 t1 = 0;
 
             //decode VLC using the context c_q and the head of VLC bitstream
-            t1 = vlc_tbl1[ c_q + (vlc_val & 0x7F)]; 
+            t1 = vlc_tbl1[ c_q + (vlc_val & 0x7F)];
 
             // if context is zero, use one MEL event
             if (c_q == 0 && x < width) //zero context
@@ -1075,7 +1063,7 @@ namespace ojph {
 
             //remove data from vlc stream, if qinf is not used, cwdlen is 0
             vlc_val = rev_advance(&vlc, t1 & 0x7);
-          
+
             // decode u
             /////////////
             // uvlc_mode is made up of u_offset bits from the quad pair
@@ -1133,14 +1121,14 @@ namespace ojph {
           if (inf & (1 << (4 + bit)))
           {
             //get 32 bits of magsgn data
-            ui32 ms_val = frwd_fetch<0xFF>(&magsgn); 
+            ui32 ms_val = frwd_fetch<0xFF>(&magsgn);
             ui32 m_n = U_q - ((inf >> (12 + bit)) & 1); // remove e_k
             frwd_advance(&magsgn, m_n);                 //consume m_n
 
             val = ms_val << 31;                     // get sign bit
             v_n = ms_val & ((1 << m_n) - 1);        // keep only m_n bits
             v_n |= ((inf >> (8 + bit)) & 1) << m_n; // add EMB e_1 as MSB
-            v_n |= 1;                               // add center of bin    
+            v_n |= 1;                               // add center of bin
             //v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
             //add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
             val |= (v_n + 2) << (p - 1);
@@ -1153,14 +1141,14 @@ namespace ojph {
           if (inf & (1 << (4 + bit)))
           {
             //get 32 bits of magsgn data
-            ui32 ms_val = frwd_fetch<0xFF>(&magsgn); 
+            ui32 ms_val = frwd_fetch<0xFF>(&magsgn);
             ui32 m_n = U_q - ((inf >> (12 + bit)) & 1); // remove e_k
             frwd_advance(&magsgn, m_n);                 //consume m_n
 
             val = ms_val << 31;                      // get sign bit
             v_n = ms_val & ((1 << m_n) - 1);        // keep only m_n bits
             v_n |= ((inf >> (8 + bit)) & 1) << m_n; // add EMB e_1 as MSB
-            v_n |= 1;                               // add center of bin    
+            v_n |= 1;                               // add center of bin
             //v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
             //add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
             val |= (v_n + 2) << (p - 1);
@@ -1177,14 +1165,14 @@ namespace ojph {
           if (inf & (1 << (4 + bit)))
           {
             //get 32 bits of magsgn data
-            ui32 ms_val = frwd_fetch<0xFF>(&magsgn); 
+            ui32 ms_val = frwd_fetch<0xFF>(&magsgn);
             ui32 m_n = U_q - ((inf >> (12 + bit)) & 1); // remove e_k
             frwd_advance(&magsgn, m_n);                 //consume m_n
 
             val = ms_val << 31;                     // get sign bit
             v_n = ms_val & ((1 << m_n) - 1);        // keep only m_n bits
             v_n |= ((inf >> (8 + bit)) & 1) << m_n; // add EMB e_1 as MSB
-            v_n |= 1;                               // add center of bin    
+            v_n |= 1;                               // add center of bin
             //v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
             //add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
             val |= (v_n + 2) << (p - 1);
@@ -1197,14 +1185,14 @@ namespace ojph {
           if (inf & (1 << (4 + bit)))
           {
             //get 32 bits of magsgn data
-            ui32 ms_val = frwd_fetch<0xFF>(&magsgn); 
+            ui32 ms_val = frwd_fetch<0xFF>(&magsgn);
             ui32 m_n = U_q - ((inf >> (12 + bit)) & 1); // remove e_k
             frwd_advance(&magsgn, m_n);                 //consume m_n
 
             val = ms_val << 31;                     // get sign bit
             v_n = ms_val & ((1 << m_n) - 1);        // keep only m_n bits
             v_n |= ((inf >> (8 + bit)) & 1) << m_n; // add EMB e_1 as MSB
-            v_n |= 1;                               // add center of bin    
+            v_n |= 1;                               // add center of bin
             //v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
             //add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
             val |= (v_n + 2) << (p - 1);
@@ -1230,7 +1218,7 @@ namespace ojph {
 
             ui32 gamma = inf & 0xF0; gamma &= gamma - 0x10; //is gamma_q 1?
             ui32 emax = vp[0] | vp[1];
-            emax = 31 - count_leading_zeros(emax | 2); // emax - 1            
+            emax = 31 - count_leading_zeros(emax | 2); // emax - 1
             ui32 kappa = gamma ? emax : 1;
 
             ui32 U_q = u_q + kappa;
@@ -1243,14 +1231,14 @@ namespace ojph {
             if (inf & (1 << (4 + bit)))
             {
               //get 32 bits of magsgn data
-              ui32 ms_val = frwd_fetch<0xFF>(&magsgn); 
+              ui32 ms_val = frwd_fetch<0xFF>(&magsgn);
               ui32 m_n = U_q - ((inf >> (12 + bit)) & 1); // remove e_k
               frwd_advance(&magsgn, m_n);                 //consume m_n
 
               val = ms_val << 31;                     // get sign bit
               v_n = ms_val & ((1 << m_n) - 1);        // keep only m_n bits
               v_n |= ((inf >> (8 + bit)) & 1) << m_n; // add EMB e_1 as MSB
-              v_n |= 1;                               // add center of bin    
+              v_n |= 1;                               // add center of bin
               //v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
               //add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
               val |= (v_n + 2) << (p - 1);
@@ -1263,14 +1251,14 @@ namespace ojph {
             if (inf & (1 << (4 + bit)))
             {
               //get 32 bits of magsgn data
-              ui32 ms_val = frwd_fetch<0xFF>(&magsgn); 
+              ui32 ms_val = frwd_fetch<0xFF>(&magsgn);
               ui32 m_n = U_q - ((inf >> (12 + bit)) & 1); // remove e_k
               frwd_advance(&magsgn, m_n);                 //consume m_n
 
               val = ms_val << 31;                     // get sign bit
               v_n = ms_val & ((1 << m_n) - 1);        // keep only m_n bits
               v_n |= ((inf >> (8 + bit)) & 1) << m_n; // add EMB e_1 as MSB
-              v_n |= 1;                               // add center of bin    
+              v_n |= 1;                               // add center of bin
               //v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
               //add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
               val |= (v_n + 2) << (p - 1);
@@ -1287,14 +1275,14 @@ namespace ojph {
             if (inf & (1 << (4 + bit)))
             {
               //get 32 bits of magsgn data
-              ui32 ms_val = frwd_fetch<0xFF>(&magsgn); 
+              ui32 ms_val = frwd_fetch<0xFF>(&magsgn);
               ui32 m_n = U_q - ((inf >> (12 + bit)) & 1); // remove e_k
               frwd_advance(&magsgn, m_n);                 //consume m_n
 
               val = ms_val << 31;                     // get sign bit
               v_n = ms_val & ((1 << m_n) - 1);        // keep only m_n bits
               v_n |= ((inf >> (8 + bit)) & 1) << m_n; // add EMB e_1 as MSB
-              v_n |= 1;                               // add center of bin    
+              v_n |= 1;                               // add center of bin
               //v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
               //add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
               val |= (v_n + 2) << (p - 1);
@@ -1307,14 +1295,14 @@ namespace ojph {
             if (inf & (1 << (4 + bit)))
             {
               //get 32 bits of magsgn data
-              ui32 ms_val = frwd_fetch<0xFF>(&magsgn); 
+              ui32 ms_val = frwd_fetch<0xFF>(&magsgn);
               ui32 m_n = U_q - ((inf >> (12 + bit)) & 1); // remove e_k
               frwd_advance(&magsgn, m_n);                 //consume m_n
 
               val = ms_val << 31;                     // get sign bit
               v_n = ms_val & ((1 << m_n) - 1);        // keep only m_n bits
               v_n |= ((inf >> (8 + bit)) & 1) << m_n; // add EMB e_1 as MSB
-              v_n |= 1;                               // add center of bin    
+              v_n |= 1;                               // add center of bin
               //v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
               //add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
               val |= (v_n + 2) << (p - 1);
@@ -1389,11 +1377,10 @@ namespace ojph {
             ui32 pattern = 0xFFFFu; // a pattern needed samples
             if (height - y < 4) {
               pattern = 0x7777u;
-              if (height - y < 3) {
+              if (height - y < 3)
                 pattern = 0x3333u;
-                if (height - y < 2)
-                  pattern = 0x1111u;
-              }
+              else if (height - y < 2)
+                pattern = 0x1111u;
             }
 
             // prev holds sign. info. for the previous quad, together
@@ -1627,7 +1614,3 @@ namespace ojph {
     }
   }
 }
-
-#ifndef _MSC_VER
-#pragma GCC diagnostic pop
-#endif
