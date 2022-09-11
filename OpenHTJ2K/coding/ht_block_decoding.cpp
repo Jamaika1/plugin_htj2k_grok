@@ -25,337 +25,69 @@
 //    CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#ifndef _MSC_VER
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wconversion"
-#pragma GCC diagnostic ignored "-Wsign-conversion"
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#pragma GCC diagnostic ignored "-Wunused-variable"
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#pragma GCC diagnostic ignored "-Wparentheses"
-#endif
 
-#include "coding_units.hpp"
-#include "dec_CxtVLC_tables.hpp"
-#include "ht_block_decoding.hpp"
-#include "coding_local.hpp"
-#include "utils.hpp"
+#if !defined(OPENHTJ2K_ENABLE_ARM_NEON) && !defined(__AVX2__)
+  #include "coding_units.hpp"
+  #include "dec_CxtVLC_tables.hpp"
+  #include "ht_block_decoding.hpp"
+  #include "coding_local.hpp"
+  #include "utils.hpp"
 
-#ifdef _OPENMP
-  #include <omp.h>
-#endif
+  #ifdef _OPENMP
+    #include <omp.h>
+  #endif
 
-#define FIRST_QUAD 0
-#define SECOND_QUAD 1
-
-// void j2k_codeblock::set_sample(const uint32_t &symbol, const uint16_t &j1, const uint16_t &j2) {
-//  sample_buf[j2 + j1 * size.x] = static_cast<int32_t>(symbol);
-//}
-
-void j2k_codeblock::calc_mbr(uint8_t &mbr, const uint16_t i, const uint16_t j, const uint32_t mbr_info,
-                             const uint8_t causal_cond) const {
-  // mbr |= (mbr_info != 0);
-  mbr |= get_state(Sigma, i - 1, j - 1);
-  mbr |= get_state(Sigma, i - 1, j);
-  mbr |= get_state(Sigma, i - 1, j + 1);
-  mbr |= get_state(Sigma, i, j - 1);
-  mbr |= get_state(Sigma, i, j + 1);
-  mbr |= get_state(Sigma, i + 1, j - 1) * causal_cond;
-  mbr |= get_state(Sigma, i + 1, j) * causal_cond;
-  mbr |= get_state(Sigma, i + 1, j + 1) * causal_cond;
-
-  mbr |= get_state(Refinement_value, i - 1, j - 1) * get_state(Scan, i - 1, j - 1);
-  mbr |= get_state(Refinement_value, i - 1, j) * get_state(Scan, i - 1, j);
-  mbr |= get_state(Refinement_value, i - 1, j + 1) * get_state(Scan, i - 1, j + 1);
-  mbr |= get_state(Refinement_value, i, j - 1) * get_state(Scan, i, j - 1);
-  mbr |= get_state(Refinement_value, i, j + 1) * get_state(Scan, i, j + 1);
-  mbr |= get_state(Refinement_value, i + 1, j - 1) * get_state(Scan, i + 1, j - 1) * causal_cond;
-  mbr |= get_state(Refinement_value, i + 1, j) * get_state(Scan, i + 1, j) * causal_cond;
-  mbr |= get_state(Refinement_value, i + 1, j + 1) * get_state(Scan, i + 1, j + 1) * causal_cond;
-}
+  #define Q0 0
+  #define Q1 1
 
 /********************************************************************************
- * functions for state_MS: state class for MagSgn decoding
+ * SP_dec: state class for HT SigProp decoding
  *******************************************************************************/
-void state_MS_dec::loadByte() {
-  tmp  = 0xFF;
-  bits = (last == 0xFF) ? 7 : 8;
-  if (pos < length) {
-    tmp = buf[pos];
-    pos++;
-    last = tmp;
-  }
+class SP_dec {
+ private:
+  const uint32_t Lref;
+  uint8_t bits;
+  uint8_t tmp;
+  uint8_t last;
+  uint32_t pos;
+  const uint8_t *Dref;
 
-  Creg |= static_cast<uint64_t>(tmp) << ctreg;
-  ctreg += bits;
-}
-void state_MS_dec::close(int32_t num_bits) {
-  Creg >>= num_bits;
-  ctreg -= num_bits;
-  while (ctreg < 32) {
-    loadByte();
-  }
-}
-
-uint8_t state_MS_dec::importMagSgnBit() {
-  uint8_t val;
-  if (bits == 0) {
-    bits = (last == 0xFF) ? 7 : 8;
-    if (pos < length) {
-      tmp = *(buf + pos);  // modDcup(MS->pos, Lcup);
-      if ((static_cast<uint16_t>(tmp) & static_cast<uint16_t>(1 << bits)) != 0) {
-        printf("ERROR: importMagSgnBit error\n");
-        //exit(EXIT_FAILURE);
-      }
-    } else if (pos == length) {
-      tmp = 0xFF;
-    } else {
-      printf("ERROR: importMagSgnBit error\n");
-      //exit(EXIT_FAILURE);
-    }
-    last = tmp;
-    pos++;
-  }
-  val = tmp & 1;
-  tmp >>= 1;
-  --bits;
-  return val;
-}
-
-int32_t state_MS_dec::decodeMagSgnValue(int32_t m_n, int32_t i_n) {
-  int32_t val = 0;
-  // uint8_t bit;
-  if (m_n > 0) {
-    val = bitmask32[m_n] & Creg;
-    //      for (int i = 0; i < m_n; i++) {
-    //        bit = MS->importMagSgnBit();
-    //        val += (bit << i);
-    //      }
-    val += (i_n << m_n);
-    close(m_n);
-  } else {
-    val = 0;
-  }
-  return val;
-}
+ public:
+  SP_dec(const uint8_t *HT_magref_segment, uint32_t magref_length)
+      : Lref(magref_length),
+        bits(0),
+        tmp(0),
+        last(0),
+        pos(0),
+        Dref((Lref == 0) ? nullptr : HT_magref_segment) {}
+  uint8_t importSigPropBit();
+};
 
 /********************************************************************************
- * functions for state_MEL_unPacker and state_MEL: state classes for MEL decoding
+ * MR_dec: state class for HT MagRef decoding
  *******************************************************************************/
-uint8_t state_MEL_unPacker::impoertMELbit() {
-  if (bits == 0) {
-    bits = (tmp == 0xFF) ? 7 : 8;
-    if (pos < length) {
-      tmp = *(buf + pos);  //+ modDcup(MEL_unPacker->pos, Lcup);
-      //        MEL_unPacker->tmp = modDcup()
-      pos++;
-    } else {
-      tmp = 0xFF;
-    }
-  }
-  bits--;
-  return (tmp >> bits) & 1;
-}
+class MR_dec {
+ private:
+  const uint32_t Lref;
+  uint8_t bits;
+  uint8_t last;
+  uint8_t tmp;
+  int32_t pos;
+  const uint8_t *Dref;
 
-uint8_t state_MEL_decoder::decodeMELSym() {
-  uint8_t eval;
-  uint8_t bit;
-  if (MEL_run == 0 && MEL_one == 0) {
-    eval = this->MEL_E[MEL_k];
-    bit  = MEL_unPacker->impoertMELbit();
-    if (bit == 1) {
-      MEL_run = 1 << eval;
-      MEL_k   = (12 < MEL_k + 1) ? 12 : MEL_k + 1;
-    } else {
-      MEL_run = 0;
-      while (eval > 0) {
-        bit     = MEL_unPacker->impoertMELbit();
-        MEL_run = (MEL_run << 1) + bit;
-        eval--;
-      }
-      MEL_k   = (0 > MEL_k - 1) ? 0 : MEL_k - 1;
-      MEL_one = 1;
-    }
-  }
-  if (MEL_run > 0) {
-    MEL_run--;
-    return 0;
-  } else {
-    MEL_one = 0;
-    return 1;
-  }
-}
+ public:
+  MR_dec(const uint8_t *HT_magref_segment, uint32_t magref_length)
+      : Lref(magref_length),
+        bits(0),
+        last(0xFF),
+        tmp(0),
+        pos((Lref == 0) ? -1 : static_cast<int32_t>(magref_length - 1)),
+        Dref((Lref == 0) ? nullptr : HT_magref_segment) {}
+  uint8_t importMagRefBit();
+};
 
 /********************************************************************************
- * functions for state_VLC: state classe for VLC decoding
- *******************************************************************************/
-#ifndef ADVANCED
-uint8_t state_VLC::importVLCBit() {
-  uint8_t val;
-  if (bits == 0) {
-    if (pos >= rev_length) {
-      tmp = *(buf + pos);  // modDcup(VLC->pos, Lcup);
-    } else {
-      printf("ERROR: import VLCBits error\n");
-      //exit(EXIT_FAILURE);
-    }
-    bits = 8;
-    if (last > 0x8F && (tmp & 0x7F) == 0x7F) {
-      bits = 7;  // bit-un-stuffing
-    }
-    last = tmp;
-    // To prevent overflow of pos
-    if (pos > 0) {
-      pos--;
-    }
-  }
-  val = tmp & 1;
-  tmp >>= 1;
-  bits--;
-  return val;
-}
-#else
-void state_VLC_dec::load_bytes() {
-  uint64_t load_val = 0;
-  int32_t new_bits  = 32;
-  last              = buf[pos + 1];
-  if (pos >= 3) {  // Common case; we have at least 4 bytes available
-    load_val = buf[pos - 3];
-    load_val = (load_val << 8) | buf[pos - 2];
-    load_val = (load_val << 8) | buf[pos - 1];
-    load_val = (load_val << 8) | buf[pos];
-    load_val = (load_val << 8) | last;  // For stuffing bit detection
-    pos -= 4;
-  } else {
-    if (pos >= 2) {
-      load_val = buf[pos - 2];
-    }
-    if (pos >= 1) {
-      load_val = (load_val << 8) | buf[pos - 1];
-    }
-    if (pos >= 0) {
-      load_val = (load_val << 8) | buf[pos];
-    }
-    pos      = 0;
-    load_val = (load_val << 8) | last;  // For stuffing bit detection
-  }
-  // Now remove any stuffing bits, shifting things down as we go
-  if ((load_val & 0x7FFF000000) > 0x7F8F000000) {
-    load_val &= 0x7FFFFFFFFF;
-    new_bits--;
-  }
-  if ((load_val & 0x007FFF0000) > 0x007F8F0000) {
-    load_val = (load_val & 0x007FFFFFFF) + ((load_val & 0xFF00000000) >> 1);
-    new_bits--;
-  }
-  if ((load_val & 0x00007FFF00) > 0x00007F8F00) {
-    load_val = (load_val & 0x00007FFFFF) + ((load_val & 0xFFFF000000) >> 1);
-    new_bits--;
-  }
-  if ((load_val & 0x0000007FFF) > 0x0000007F8F) {
-    load_val = (load_val & 0x0000007FFF) + ((load_val & 0xFFFFFF0000) >> 1);
-    new_bits--;
-  }
-  load_val >>= 8;  // Shifts away the extra byte we imported
-  Creg |= (load_val << ctreg);
-  ctreg += new_bits;
-}
-
-uint8_t state_VLC_dec::getVLCbit() {
-  // "bits" is not actually bits, but a bit
-  bits = (uint8_t)(Creg & 0x01);
-  close32(1);
-  return bits;
-}
-
-void state_VLC_dec::close32(int32_t num_bits) {
-  Creg >>= num_bits;
-  ctreg -= num_bits;
-  while (ctreg < 32) {
-    load_bytes();
-  }
-}
-#endif
-
-void state_VLC_dec::decodeCxtVLC(const uint16_t &context, uint8_t (&u_off)[2], uint8_t (&rho)[2],
-                                 uint8_t (&emb_k)[2], uint8_t (&emb_1)[2], const uint8_t &first_or_second,
-                                 const uint16_t *dec_CxtVLC_table) {
-#ifndef ADVANCED
-  uint8_t b_low = tmp;
-  uint8_t b_upp = *(buf + pos);  // modDcup(VLC->pos, Lcup);
-  uint16_t word = (b_upp << bits) + b_low;
-  uint8_t cwd   = word & 0x7F;
-#else
-  uint8_t cwd = Creg & 0x7f;
-#endif
-  uint16_t idx           = cwd + (context << 7);
-  uint16_t value         = dec_CxtVLC_table[idx];
-  u_off[first_or_second] = value & 1;
-  // value >>= 1;
-  // uint8_t len = value & 0x07;
-  // value >>= 3;
-  // rho[first_or_second] = value & 0x0F;
-  // value >>= 4;
-  // emb_k[first_or_second] = value & 0x0F;
-  // value >>= 4;
-  // emb_1[first_or_second] = value & 0x0F;
-  uint8_t len            = (value & 0x000F) >> 1;
-  rho[first_or_second]   = (value & 0x00F0) >> 4;
-  emb_k[first_or_second] = (value & 0x0F00) >> 8;
-  emb_1[first_or_second] = (value & 0xF000) >> 12;
-
-#ifndef ADVANCED
-  for (int i = 0; i < len; i++) {
-    importVLCBit();
-  }
-#else
-  close32(len);
-#endif
-}
-
-uint8_t state_VLC_dec::decodeUPrefix() {
-  if (getbitfunc == 1) {
-    return 1;
-  }
-  if (getbitfunc == 1) {
-    return 2;
-  }
-  if (getbitfunc == 1) {
-    return 3;
-  } else {
-    return 5;
-  }
-}
-
-uint8_t state_VLC_dec::decodeUSuffix(const uint8_t &u_pfx) {
-  uint8_t bit, val;
-  if (u_pfx < 3) {
-    return 0;
-  }
-  val = getbitfunc;
-  if (u_pfx == 3) {
-    return val;
-  }
-  for (int i = 1; i < 5; i++) {
-    bit = getbitfunc;
-    val += (bit << i);
-  }
-  return val;
-}
-uint8_t state_VLC_dec::decodeUExtension(const uint8_t &u_sfx) {
-  uint8_t bit, val;
-  if (u_sfx < 28) {
-    return 0;
-  }
-  val = getbitfunc;
-  for (int i = 1; i < 4; i++) {
-    bit = getbitfunc;
-    val += (bit << i);
-  }
-  return val;
-}
-/********************************************************************************
- * functions for SP_dec: state classe for HT SigProp decoding
+ * functions for SP_dec: state class for HT SigProp decoding
  *******************************************************************************/
 uint8_t SP_dec::importSigPropBit() {
   uint8_t val;
@@ -366,7 +98,6 @@ uint8_t SP_dec::importSigPropBit() {
       pos++;
       if ((tmp & (1 << bits)) != 0) {
         printf("ERROR: importSigPropBit error\n");
-        //exit(EXIT_FAILURE);
       }
     } else {
       tmp = 0;
@@ -374,13 +105,13 @@ uint8_t SP_dec::importSigPropBit() {
     last = tmp;
   }
   val = tmp & 1;
-  tmp >>= 1;
+  tmp = static_cast<uint8_t>(tmp >> 1);
   bits--;
   return val;
 }
 
 /********************************************************************************
- * MR_dec: state classe for HT MagRef decoding
+ * MR_dec: state class for HT MagRef decoding
  *******************************************************************************/
 uint8_t MR_dec::importMagRefBit() {
   uint8_t val;
@@ -398,611 +129,577 @@ uint8_t MR_dec::importMagRefBit() {
     last = tmp;
   }
   val = tmp & 1;
-  tmp >>= 1;
+  tmp = static_cast<uint8_t>(tmp >> 1);
   bits--;
   return val;
 }
 
-auto decodeSigEMB = [](state_MEL_decoder &MEL_decoder, state_VLC_dec &VLC, const uint16_t &context,
-                       uint8_t (&u_off)[2], uint8_t (&rho)[2], uint8_t (&emb_k)[2], uint8_t (&emb_1)[2],
-                       const uint8_t &first_or_second, const uint16_t *dec_CxtVLC_table) {
-  uint8_t sym;
-  if (context == 0) {
-    sym = MEL_decoder.decodeMELSym();
-    if (sym == 0) {
-      rho[first_or_second] = u_off[first_or_second] = emb_k[first_or_second] = emb_1[first_or_second] = 0;
-      return;
-    }
-  }
-  VLC.decodeCxtVLC(context, u_off, rho, emb_k, emb_1, first_or_second, dec_CxtVLC_table);
-};
+uint8_t j2k_codeblock::calc_mbr(const int16_t i, const int16_t j, const uint8_t causal_cond) const {
+  const int16_t im1 = static_cast<int16_t>(i - 1);
+  const int16_t jm1 = static_cast<int16_t>(j - 1);
+  const int16_t ip1 = static_cast<int16_t>(i + 1);
+  const int16_t jp1 = static_cast<int16_t>(j + 1);
+  uint8_t mbr       = get_state(Sigma, im1, jm1);
+  mbr               = mbr | get_state(Sigma, im1, j);
+  mbr               = mbr | get_state(Sigma, im1, jp1);
+  mbr               = mbr | get_state(Sigma, i, jm1);
+  mbr               = mbr | get_state(Sigma, i, jp1);
+  mbr               = mbr | static_cast<uint8_t>(get_state(Sigma, ip1, jm1) * causal_cond);
+  mbr               = mbr | static_cast<uint8_t>(get_state(Sigma, ip1, j) * causal_cond);
+  mbr               = mbr | static_cast<uint8_t>(get_state(Sigma, ip1, jp1) * causal_cond);
 
-inline void get_sample_position_from_quad(uint16_t q, uint16_t QW, uint16_t Wblk, uint16_t Hblk,
-                                          uint16_t &sample_0, uint16_t &sample_1, uint16_t &sample_2,
-                                          uint16_t &sample_3) {
-  uint16_t qx, qy;
-  qx       = q % QW;
-  qy       = q / QW;
-  sample_0 = 2 * qx + qy * Wblk;
-  sample_1 = 2 * qx + (qy + 1) * Wblk;
-  if (sample_0 % Hblk != Hblk) {
-    sample_3 = sample_1 + 1;
-  } else {
-    sample_1 = 0xFFFF;
-    sample_3 = 0xFFFF;
-  }
-
-  if (sample_0 % Wblk != Wblk) {
-    sample_2 = sample_0 + 1;
-  } else {
-    sample_2 = 0xFFFF;
-    sample_3 = 0xFFFF;
-  }
+  mbr = mbr | static_cast<uint8_t>(get_state(Refinement_value, im1, jm1) * get_state(Scan, im1, jm1));
+  mbr = mbr | static_cast<uint8_t>(get_state(Refinement_value, im1, j) * get_state(Scan, im1, j));
+  mbr = mbr | static_cast<uint8_t>(get_state(Refinement_value, im1, jp1) * get_state(Scan, im1, jp1));
+  mbr = mbr | static_cast<uint8_t>(get_state(Refinement_value, i, jm1) * get_state(Scan, i, jm1));
+  mbr = mbr | static_cast<uint8_t>(get_state(Refinement_value, i, jp1) * get_state(Scan, i, jp1));
+  mbr = mbr
+        | static_cast<uint8_t>(get_state(Refinement_value, ip1, jm1) * get_state(Scan, ip1, jm1)
+                               * causal_cond);
+  mbr = mbr
+        | static_cast<uint8_t>(get_state(Refinement_value, ip1, j) * get_state(Scan, ip1, j) * causal_cond);
+  mbr = mbr
+        | static_cast<uint8_t>(get_state(Refinement_value, ip1, jp1) * get_state(Scan, ip1, jp1)
+                               * causal_cond);
+  return mbr;
 }
 
-void ht_cleanup_decode(j2k_codeblock *block, uint8_t *const Dcup, const uint32_t &Lcup,
-                       const uint8_t &ROIshift, const uint8_t &pLSB, state_MS_dec &MS,
-                       state_MEL_unPacker &MEL_unpacker, state_MEL_decoder &MEL_decoder,
-                       state_VLC_dec &VLC) {
-  const uint16_t QW = ceil_int(block->size.x, 2);
-  const uint16_t QH = ceil_int(block->size.y, 2);
+void ht_cleanup_decode(j2k_codeblock *block, const uint8_t &pLSB, const int32_t Lcup, const int32_t Pcup,
+                       const int32_t Scup) {
+  fwd_buf<0xFF> MagSgn(block->get_compressed_data(), Pcup);
+  MEL_dec MEL(block->get_compressed_data(), Lcup, Scup);
+  rev_buf VLC_dec(block->get_compressed_data(), Lcup, Scup);
+  const uint16_t QW = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(block->size.x), 2));
+  const uint16_t QH = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(block->size.y), 2));
 
-  // buffers shall be zeroed.
-  std::unique_ptr<uint8_t[]> sigma_n = std::make_unique<uint8_t[]>(4 * QW * QH);
-  std::unique_ptr<uint8_t[]> E       = std::make_unique<uint8_t[]>(4 * QW * QH);
-  std::unique_ptr<uint32_t[]> mu_n   = std::make_unique<uint32_t[]>(4 * QW * QH);
-  memset(sigma_n.get(), 0, sizeof(uint8_t) * 4 * QW * QH);
-  memset(E.get(), 0, sizeof(uint8_t) * 4 * QW * QH);
-  memset(mu_n.get(), 0, sizeof(uint32_t) * 4 * QW * QH);
+  alignas(32) uint32_t m_quads[8];
+  alignas(32) uint32_t msval[8];
+  alignas(32) int32_t sigma_quads[8];
+  alignas(32) uint32_t mu_quads[8];
+  alignas(32) uint32_t v_quads[8];
+  alignas(32) uint32_t known_1[2];
 
-  uint16_t q = 0;
+  auto mp0 = block->sample_buf.get();
+  auto mp1 = block->sample_buf.get() + block->size.x;
+  auto sp0 = block->block_states.get() + 1 + block->blkstate_stride;
+  auto sp1 = block->block_states.get() + 1 + 2 * block->blkstate_stride;
 
-  uint16_t context;
-
-  uint8_t rho[2];
-  uint8_t u_off[2];
-  uint8_t emb_k[2];
-  uint8_t emb_1[2];
-  int32_t u[2];
-  uint8_t u_pfx[2];
-  uint8_t u_sfx[2];
-  uint8_t u_ext[2];
-  int32_t U[2];
-  int32_t m[2][4];
-  int32_t v[2][4];
-  uint8_t gamma[2];
-  uint8_t kappa[2] = {1, 1};  // kappa is always 1 for initial line-pair
+  int32_t rho0, rho1;
+  uint32_t u_off0, u_off1;
+  int32_t emb_1_0, emb_1_1;
+  int32_t emb_k_0, emb_k_1;
+  uint32_t u0, u1;
+  uint32_t U0, U1;
+  uint8_t gamma0, gamma1;
+  uint32_t kappa0 = 1, kappa1 = 1;  // kappa is always 1 for initial line-pair
 
   const uint16_t *dec_table0, *dec_table1;
   dec_table0 = dec_CxtVLC_table0_fast_16;
   dec_table1 = dec_CxtVLC_table1_fast_16;
 
-  uint16_t q1, q2;
-  uint8_t E_n[2], E_ne[2], E_nw[2], E_nf[2], max_E[2];
-  int32_t m_n[2], known_1[2];
+  alignas(32) auto rholine = MAKE_UNIQUE<int32_t[]>(QW + 3U);
+  rholine[0]               = 0;
+  auto rho_p               = rholine.get() + 1;
+  alignas(32) auto Eline   = MAKE_UNIQUE<int32_t[]>(2U * QW + 6U);
+  Eline[0]                 = 0;
+  auto E_p                 = Eline.get() + 1;
 
-  context = 0;
+  int32_t context = 0;
+  uint32_t vlcval;
+  int32_t mel_run = MEL.get_run();
+
   // Initial line-pair
-  for (; q < QW - 1;) {
-    q1 = q;
-    q2 = q + 1;
-#ifdef ADVANCED
-    decodeSigEMB(MEL_decoder, VLC, context, u_off, rho, emb_k, emb_1, FIRST_QUAD, dec_table0);
-    if (u_off[FIRST_QUAD] == 0) {
-      assert(emb_k[FIRST_QUAD] == 0 && emb_1[FIRST_QUAD] == 0);
-    }
-    for (int i = 0; i < 4; i++) {
-      sigma_n[4 * q1 + i] = (rho[FIRST_QUAD] >> i) & 1;
-    }
-    // calculate context for the next quad
-    context = sigma_n[4 * q1];            // f
-    context |= sigma_n[4 * q1 + 1];       // sf
-    context += sigma_n[4 * q1 + 2] << 1;  // w << 1
-    context += sigma_n[4 * q1 + 3] << 2;  // sw << 2
-#else
-    // calculate context for the current quad
-    if (q1 > 0) {
-      context = sigma_n[4 * q1 - 4];        // f
-      context |= sigma_n[4 * q1 - 3];       // sf
-      context += sigma_n[4 * q1 - 2] << 1;  // w << 1
-      context += sigma_n[4 * q1 - 1] << 2;  // sw << 2
-    }
-    decodeSigEMB(MEL_decoder, VLC, context, u_off, rho, emb_k, emb_1, FIRST_QUAD, dec_table0);
-#endif
-    if (u_off[FIRST_QUAD] == 0) {
-      assert(emb_k[FIRST_QUAD] == 0 && emb_1[FIRST_QUAD] == 0);
-    }
-    for (int i = 0; i < 4; i++) {
-      sigma_n[4 * q1 + i] = (rho[FIRST_QUAD] >> i) & 1;
-    }
-
-#ifdef ADVANCED
-    decodeSigEMB(MEL_decoder, VLC, context, u_off, rho, emb_k, emb_1, SECOND_QUAD, dec_table0);
-    if (u_off[SECOND_QUAD] == 0) {
-      assert(emb_k[SECOND_QUAD] == 0 && emb_1[SECOND_QUAD] == 0);
-    }
-    for (int i = 0; i < 4; i++) {
-      sigma_n[4 * q2 + i] = (rho[SECOND_QUAD] >> i) & 1;
-    }
-    // calculate context for the next quad
-    context = sigma_n[4 * q2];            // f
-    context |= sigma_n[4 * q2 + 1];       // sf
-    context += sigma_n[4 * q2 + 2] << 1;  // w << 1
-    context += sigma_n[4 * q2 + 3] << 2;  // sw << 2
-#else
-    // calculate context for the current quad
-    if (q2 > 0) {
-      context = sigma_n[4 * q2 - 4];        // f
-      context |= sigma_n[4 * q2 - 3];       // sf
-      context += sigma_n[4 * q2 - 2] << 1;  // w << 1
-      context += sigma_n[4 * q2 - 1] << 2;  // sw << 2
-    }
-    decodeSigEMB(MEL_decoder, VLC, context, u_off, rho, emb_k, emb_1, SECOND_QUAD, dec_table0);
-#endif
-    if (u_off[SECOND_QUAD] == 0) {
-      assert(emb_k[SECOND_QUAD] == 0 && emb_1[SECOND_QUAD] == 0);
-    }
-    for (int i = 0; i < 4; i++) {
-      sigma_n[4 * q2 + i] = (rho[SECOND_QUAD] >> i) & 1;
-    }
-
-    if (u_off[FIRST_QUAD] == 1 && u_off[SECOND_QUAD] == 1) {
-      if (MEL_decoder.decodeMELSym() == 1) {
-        u_pfx[FIRST_QUAD]  = VLC.decodeUPrefix();
-        u_pfx[SECOND_QUAD] = VLC.decodeUPrefix();
-        u_sfx[FIRST_QUAD]  = VLC.decodeUSuffix(u_pfx[FIRST_QUAD]);
-        u_sfx[SECOND_QUAD] = VLC.decodeUSuffix(u_pfx[SECOND_QUAD]);
-        u_ext[FIRST_QUAD]  = VLC.decodeUExtension(u_sfx[FIRST_QUAD]);
-        u_ext[SECOND_QUAD] = VLC.decodeUExtension(u_sfx[SECOND_QUAD]);
-        u[FIRST_QUAD]      = 2 + u_pfx[FIRST_QUAD] + u_sfx[FIRST_QUAD] + (u_ext[FIRST_QUAD] << 2);
-        u[SECOND_QUAD]     = 2 + u_pfx[SECOND_QUAD] + u_sfx[SECOND_QUAD] + (u_ext[SECOND_QUAD] << 2);
-      } else {
-        u_pfx[FIRST_QUAD] = VLC.decodeUPrefix();
-        if (u_pfx[FIRST_QUAD] > 2) {
-          u[SECOND_QUAD]    = VLC.getbitfunc + 1;  // block->VLC->importVLCBit() + 1;
-          u_sfx[FIRST_QUAD] = VLC.decodeUSuffix(u_pfx[FIRST_QUAD]);
-          u_ext[FIRST_QUAD] = VLC.decodeUExtension(u_sfx[FIRST_QUAD]);
-        } else {
-          u_pfx[SECOND_QUAD] = VLC.decodeUPrefix();
-          u_sfx[FIRST_QUAD]  = VLC.decodeUSuffix(u_pfx[FIRST_QUAD]);
-          u_sfx[SECOND_QUAD] = VLC.decodeUSuffix(u_pfx[SECOND_QUAD]);
-          u_ext[FIRST_QUAD]  = VLC.decodeUExtension(u_sfx[FIRST_QUAD]);
-          u_ext[SECOND_QUAD] = VLC.decodeUExtension(u_sfx[SECOND_QUAD]);
-          u[SECOND_QUAD]     = u_pfx[SECOND_QUAD] + u_sfx[SECOND_QUAD] + (u_ext[SECOND_QUAD] << 2);
-        }
-        u[FIRST_QUAD] = u_pfx[FIRST_QUAD] + u_sfx[FIRST_QUAD] + (u_ext[FIRST_QUAD] << 2);
+  for (int32_t q = 0; q < QW - 1; q += 2) {
+    // Decoding of significance and EMB patterns and unsigned residual offsets
+    vlcval       = VLC_dec.fetch();
+    uint16_t tv0 = dec_table0[(vlcval & 0x7F) + (static_cast<unsigned int>(context << 7))];
+    if (context == 0) {
+      mel_run -= 2;
+      tv0 = (mel_run == -1) ? tv0 : 0;
+      if (mel_run < 0) {
+        mel_run = MEL.get_run();
       }
-    } else if (u_off[FIRST_QUAD] == 1 && u_off[SECOND_QUAD] == 0) {
-      u_pfx[FIRST_QUAD] = VLC.decodeUPrefix();
-      u_sfx[FIRST_QUAD] = VLC.decodeUSuffix(u_pfx[FIRST_QUAD]);
-      u_ext[FIRST_QUAD] = VLC.decodeUExtension(u_sfx[FIRST_QUAD]);
-      u[FIRST_QUAD]     = u_pfx[FIRST_QUAD] + u_sfx[FIRST_QUAD] + (u_ext[FIRST_QUAD] << 2);
-      u[SECOND_QUAD]    = 0;
-    } else if (u_off[FIRST_QUAD] == 0 && u_off[SECOND_QUAD] == 1) {
-      u_pfx[SECOND_QUAD] = VLC.decodeUPrefix();
-      u_sfx[SECOND_QUAD] = VLC.decodeUSuffix(u_pfx[SECOND_QUAD]);
-      u_ext[SECOND_QUAD] = VLC.decodeUExtension(u_sfx[SECOND_QUAD]);
-      u[FIRST_QUAD]      = 0;
-      u[SECOND_QUAD]     = u_pfx[SECOND_QUAD] + u_sfx[SECOND_QUAD] + (u_ext[SECOND_QUAD] << 2);
-    } else {
-      u[FIRST_QUAD]  = 0;
-      u[SECOND_QUAD] = 0;
     }
 
-    U[FIRST_QUAD]  = kappa[FIRST_QUAD] + u[FIRST_QUAD];
-    U[SECOND_QUAD] = kappa[SECOND_QUAD] + u[SECOND_QUAD];
+    rho0    = static_cast<uint8_t>((tv0 & 0x00F0) >> 4);
+    emb_1_0 = static_cast<uint8_t>((tv0 & 0x0F00) >> 8);
+    emb_k_0 = static_cast<uint8_t>((tv0 & 0xF000) >> 12);
 
-    for (int i = 0; i < 4; i++) {
-      m[FIRST_QUAD][i]  = sigma_n[4 * q1 + i] * U[FIRST_QUAD] - ((emb_k[FIRST_QUAD] >> i) & 1);
-      m[SECOND_QUAD][i] = sigma_n[4 * q2 + i] * U[SECOND_QUAD] - ((emb_k[SECOND_QUAD] >> i) & 1);
+    *rho_p++ = rho0;
+    // calculate context for the next quad
+    context = static_cast<uint16_t>((rho0 >> 1) | (rho0 & 1));
+
+    // Decoding of significance and EMB patterns and unsigned residual offsets
+    vlcval       = VLC_dec.advance(static_cast<uint8_t>((tv0 & 0x000F) >> 1));
+    uint16_t tv1 = dec_table0[(vlcval & 0x7F) + (static_cast<unsigned int>(context << 7))];
+    if (context == 0) {
+      mel_run -= 2;
+      tv1 = (mel_run == -1) ? tv1 : 0;
+      if (mel_run < 0) {
+        mel_run = MEL.get_run();
+      }
+    }
+
+    rho1    = static_cast<uint8_t>((tv1 & 0x00F0) >> 4);
+    emb_1_1 = static_cast<uint8_t>((tv1 & 0x0F00) >> 8);
+    emb_k_1 = static_cast<uint8_t>((tv1 & 0xF000) >> 12);
+
+    *rho_p++ = rho1;
+
+    for (uint32_t i = 0; i < 4; i++) {
+      sigma_quads[i] = (rho0 >> i) & 1;
+    }
+    for (uint32_t i = 0; i < 4; i++) {
+      sigma_quads[i + 4] = (rho1 >> i) & 1;
+    }
+
+    // calculate context for the next quad
+    context = static_cast<uint16_t>((rho1 >> 1) | (rho1 & 1));
+
+    vlcval = VLC_dec.advance(static_cast<uint8_t>((tv1 & 0x000F) >> 1));
+    u_off0 = tv0 & 1;
+    u_off1 = tv1 & 1;
+
+    uint32_t mel_offset = 0;
+    if (u_off0 == 1 && u_off1 == 1) {
+      mel_run -= 2;
+      mel_offset = (mel_run == -1) ? 0x40 : 0;
+      if (mel_run < 0) {
+        mel_run = MEL.get_run();
+      }
+    }
+    uint32_t idx        = (vlcval & 0x3F) + (u_off0 << 6U) + (u_off1 << 7U) + mel_offset;
+    int32_t uvlc_result = uvlc_dec_0[idx];
+    // remove total prefix length
+    vlcval = VLC_dec.advance(uvlc_result & 0x7);
+    uvlc_result >>= 3;
+    // extract suffixes for quad 0 and 1
+    uint32_t len = uvlc_result & 0xF;            // suffix length for 2 quads (up to 10 = 5 + 5)
+    uint32_t tmp = vlcval & ((1U << len) - 1U);  // suffix value for 2 quads
+    vlcval       = VLC_dec.advance(len);
+    uvlc_result >>= 4;
+    // quad 0 length
+    len = uvlc_result & 0x7;  // quad 0 suffix length
+    uvlc_result >>= 3;
+    u0 = (uvlc_result & 7) + (tmp & ~(0xFFU << len));
+    u1 = static_cast<uint32_t>(uvlc_result >> 3) + (tmp >> len);
+
+    U0 = kappa0 + u0;
+    U1 = kappa1 + u1;
+
+    for (uint32_t i = 0; i < 4; i++) {
+      m_quads[i]     = sigma_quads[i] * U0 - ((emb_k_0 >> i) & 1);
+      m_quads[i + 4] = sigma_quads[i + 4] * U1 - ((emb_k_1 >> i) & 1);
     }
 
     // recoverMagSgnValue
-    int32_t n;
+    for (uint32_t i = 0; i < 8; i++) {
+      msval[i] = MagSgn.fetch();
+      MagSgn.advance(m_quads[i]);
+    }
 
-    for (int i = 0; i < 4; i++) {
-      n                   = 4 * q1 + i;
-      m_n[FIRST_QUAD]     = m[FIRST_QUAD][i];
-      known_1[FIRST_QUAD] = (emb_1[FIRST_QUAD] >> i) & 1;
-      v[FIRST_QUAD][i]    = MS.decodeMagSgnValue(m_n[FIRST_QUAD], known_1[FIRST_QUAD]);
-
-      if (m_n[FIRST_QUAD] != 0) {
-        E[n]    = 32 - count_leading_zeros(v[FIRST_QUAD][i]);
-        mu_n[n] = (v[FIRST_QUAD][i] >> 1) + 1;
-        mu_n[n] <<= pLSB;
-        mu_n[n] |= (v[FIRST_QUAD][i] & 1) << 31;  // sign bit
+    for (uint32_t i = 0; i < 4; i++) {
+      known_1[Q0] = (emb_1_0 >> i) & 1;
+      v_quads[i]  = msval[i] & ((1 << m_quads[i]) - 1);
+      v_quads[i] |= known_1[Q0] << m_quads[i];
+      if (m_quads[i] != 0) {
+        mu_quads[i] = static_cast<uint32_t>((v_quads[i] >> 1) + 1);
+        mu_quads[i] <<= pLSB;
+        mu_quads[i] |= static_cast<uint32_t>((v_quads[i] & 1) << 31);  // sign bit
       } else {
-        // mu_n[n] = 0;
-        // E[n]  = 0;
+        mu_quads[i] = 0;
       }
     }
-    for (int i = 0; i < 4; i++) {
-      n                    = 4 * q2 + i;
-      m_n[SECOND_QUAD]     = m[SECOND_QUAD][i];
-      known_1[SECOND_QUAD] = (emb_1[SECOND_QUAD] >> i) & 1;
-      v[SECOND_QUAD][i]    = MS.decodeMagSgnValue(m_n[SECOND_QUAD], known_1[SECOND_QUAD]);
-      if (m_n[SECOND_QUAD] != 0) {
-        E[n]    = 32 - count_leading_zeros(v[SECOND_QUAD][i]);
-        mu_n[n] = (v[SECOND_QUAD][i] >> 1) + 1;
-        mu_n[n] <<= pLSB;
-        mu_n[n] |= (v[SECOND_QUAD][i] & 1) << 31;  // sign bit
+    for (uint32_t i = 0; i < 4; i++) {
+      known_1[Q1]    = (emb_1_1 >> i) & 1;
+      v_quads[i + 4] = msval[i + 4] & ((1 << m_quads[i + 4]) - 1);
+      v_quads[i + 4] |= known_1[Q1] << m_quads[i + 4];
+      if (m_quads[i + 4] != 0) {
+        mu_quads[i + 4] = static_cast<uint32_t>((v_quads[i + 4] >> 1) + 1);
+        mu_quads[i + 4] <<= pLSB;
+        mu_quads[i + 4] |= static_cast<uint32_t>((v_quads[i + 4] & 1) << 31);  // sign bit
       } else {
-        // mu_n[n] = 0;
-        // E[n]  = 0;
+        mu_quads[i + 4] = 0;
       }
     }
-    q += 2;  // move to the next quad-pair
+    *mp0++ = static_cast<int>(mu_quads[0]);
+    *mp0++ = static_cast<int>(mu_quads[2]);
+    *mp0++ = static_cast<int>(mu_quads[0 + 4]);
+    *mp0++ = static_cast<int>(mu_quads[2 + 4]);
+    *mp1++ = static_cast<int>(mu_quads[1]);
+    *mp1++ = static_cast<int>(mu_quads[3]);
+    *mp1++ = static_cast<int>(mu_quads[1 + 4]);
+    *mp1++ = static_cast<int>(mu_quads[3 + 4]);
+
+    *sp0++ = (rho0 >> 0) & 1;
+    *sp0++ = (rho0 >> 2) & 1;
+    *sp0++ = (rho1 >> 0) & 1;
+    *sp0++ = (rho1 >> 2) & 1;
+    *sp1++ = (rho0 >> 1) & 1;
+    *sp1++ = (rho0 >> 3) & 1;
+    *sp1++ = (rho1 >> 1) & 1;
+    *sp1++ = (rho1 >> 3) & 1;
+
+    *E_p++ = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[1])));
+    *E_p++ = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[3])));
+    *E_p++ = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[5])));
+    *E_p++ = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[7])));
   }
   // if QW is odd number ..
   if (QW % 2 == 1) {
-    q1 = q;
-#ifdef ADVANCED
-    decodeSigEMB(MEL_decoder, VLC, context, u_off, rho, emb_k, emb_1, FIRST_QUAD, dec_table0);
-#else
-    if (q1 > 0) {
-      context = sigma_n[4 * q1 - 4];        // f
-      context |= sigma_n[4 * q1 - 3];       // sf
-      context += sigma_n[4 * q1 - 2] << 1;  // w << 1
-      context += sigma_n[4 * q1 - 1] << 2;  // sw << 2
+    // Decoding of significance and EMB patterns and unsigned residual offsets
+    vlcval       = VLC_dec.fetch();
+    uint16_t tv0 = dec_table0[(vlcval & 0x7F) + (static_cast<unsigned int>(context << 7))];
+    if (context == 0) {
+      mel_run -= 2;
+      tv0 = (mel_run == -1) ? tv0 : 0;
+      if (mel_run < 0) {
+        mel_run = MEL.get_run();
+      }
     }
-    decodeSigEMB(MEL_decoder, VLC, context, u_off, rho, emb_k, emb_1, FIRST_QUAD, dec_table0);
-#endif
-    if (u_off[FIRST_QUAD] == 0) {
-      assert(emb_k[FIRST_QUAD] == 0 && emb_1[FIRST_QUAD] == 0);
-    }
-    for (int i = 0; i < 4; i++) {
-      sigma_n[4 * q1 + i] = (rho[FIRST_QUAD] >> i) & 1;
-    }
-    if (u_off[FIRST_QUAD] == 1) {
-      u_pfx[FIRST_QUAD] = VLC.decodeUPrefix();
-      u_sfx[FIRST_QUAD] = VLC.decodeUSuffix(u_pfx[FIRST_QUAD]);
-      u_ext[FIRST_QUAD] = VLC.decodeUExtension(u_sfx[FIRST_QUAD]);
-      u[FIRST_QUAD]     = u_pfx[FIRST_QUAD] + u_sfx[FIRST_QUAD] + (u_ext[FIRST_QUAD] << 2);
-    } else {
-      u[FIRST_QUAD] = 0;
+    rho0     = static_cast<uint8_t>((tv0 & 0x00F0) >> 4);
+    emb_1_0  = static_cast<uint8_t>((tv0 & 0x0F00) >> 8);
+    emb_k_0  = static_cast<uint8_t>((tv0 & 0xF000) >> 12);
+    *rho_p++ = rho0;
+
+    for (uint32_t i = 0; i < 4; i++) {
+      sigma_quads[i] = (rho0 >> i) & 1;
     }
 
-    U[FIRST_QUAD] = kappa[FIRST_QUAD] + u[FIRST_QUAD];
+    vlcval = VLC_dec.advance(static_cast<uint8_t>((tv0 & 0x000F) >> 1));
 
-    for (int i = 0; i < 4; i++) {
-      m[FIRST_QUAD][i] = sigma_n[4 * q1 + i] * U[FIRST_QUAD] - ((emb_k[FIRST_QUAD] >> i) & 1);
+    u_off0 = tv0 & 1;
+
+    uint32_t idx        = (vlcval & 0x3F) + (u_off0 << 6U);
+    int32_t uvlc_result = uvlc_dec_0[idx];
+    // remove total prefix length
+    vlcval = VLC_dec.advance(uvlc_result & 0x7);
+    uvlc_result >>= 3;
+    // extract suffixes for quad 0 and 1
+    uint32_t len = uvlc_result & 0xF;            // suffix length for 2 quads (up to 10 = 5 + 5)
+    uint32_t tmp = vlcval & ((1U << len) - 1U);  // suffix value for 2 quads
+    vlcval       = VLC_dec.advance(len);
+    uvlc_result >>= 4;
+    // quad 0 length
+    len = uvlc_result & 0x7;  // quad 0 suffix length
+    uvlc_result >>= 3;
+    u0 = (uvlc_result & 7) + (tmp & ~(0xFFU << len));
+
+    U0 = kappa0 + u0;
+
+    for (uint32_t i = 0; i < 4; i++) {
+      m_quads[i] = sigma_quads[i] * U0 - ((emb_k_0 >> i) & 1);
     }
+
     // recoverMagSgnValue
-    int32_t n;
-    for (int i = 0; i < 4; i++) {
-      n                   = 4 * q1 + i;
-      m_n[FIRST_QUAD]     = m[FIRST_QUAD][i];
-      known_1[FIRST_QUAD] = (emb_1[FIRST_QUAD] >> i) & 1;
-      v[FIRST_QUAD][i]    = MS.decodeMagSgnValue(m_n[FIRST_QUAD], known_1[FIRST_QUAD]);
+    for (uint32_t i = 0; i < 4; i++) {
+      msval[i] = MagSgn.fetch();
+      MagSgn.advance(m_quads[i]);
+    }
 
-      if (m_n[FIRST_QUAD] != 0) {
-        E[n]    = 32 - count_leading_zeros(v[FIRST_QUAD][i]);
-        mu_n[n] = (v[FIRST_QUAD][i] >> 1) + 1;
-        mu_n[n] <<= pLSB;
-        mu_n[n] |= (v[FIRST_QUAD][i] & 1) << 31;  // sign bit
+    for (uint32_t i = 0; i < 4; i++) {
+      known_1[Q0] = (emb_1_0 >> i) & 1;
+      v_quads[i]  = msval[i] & ((1 << m_quads[i]) - 1);
+      v_quads[i] |= known_1[Q0] << m_quads[i];
+      if (m_quads[i] != 0) {
+        mu_quads[i] = static_cast<uint32_t>((v_quads[i] >> 1) + 1);
+        mu_quads[i] <<= pLSB;
+        mu_quads[i] |= static_cast<uint32_t>((v_quads[i] & 1) << 31);  // sign bit
       } else {
-        // mu_n[n] = 0;
-        // E[n]  = 0;
+        mu_quads[i] = 0;
       }
     }
-    q++;  // move to the next quad-pair
-  }       // Initial line-pair end
+    *mp0++ = static_cast<int>(mu_quads[0]);
+    *mp0++ = static_cast<int>(mu_quads[2]);
+    *mp1++ = static_cast<int>(mu_quads[1]);
+    *mp1++ = static_cast<int>(mu_quads[3]);
+    *E_p++ = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[1])));
+    *E_p++ = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[3])));
 
-  // Non-nitial line-pair
-  uint16_t context1, context2;
+    *sp0++ = (rho0 >> 0) & 1;
+    *sp0++ = (rho0 >> 2) & 1;
+    *sp1++ = (rho0 >> 1) & 1;
+    *sp1++ = (rho0 >> 3) & 1;
+
+  }  // Initial line-pair end
+
+  /*******************************************************************************************************************/
+  // Non-initial line-pair
+  /*******************************************************************************************************************/
+
   for (uint16_t row = 1; row < QH; row++) {
-    while ((q - row * QW) < QW - 1 && q < QW * QH) {
-      q1 = q;
-      q2 = q + 1;
+    rho_p      = rholine.get() + 1;
+    E_p        = Eline.get() + 1;
+    mp0        = block->sample_buf.get() + (row * 2U) * block->size.x;
+    mp1        = block->sample_buf.get() + (row * 2U + 1U) * block->size.x;
+    sp0        = block->block_states.get() + (row * 2U + 1U) * block->blkstate_stride + 1U;
+    sp1        = block->block_states.get() + (row * 2U + 2U) * block->blkstate_stride + 1U;
+    int32_t qx = 0;
+    rho1       = 0;
 
-      // calculate context for the current quad
-      context1 = sigma_n[4 * (q1 - QW) + 1];          // n
-      context1 += (sigma_n[4 * (q1 - QW) + 3] << 2);  // ne
-      if (q1 % QW) {
-        context1 |= sigma_n[4 * (q1 - QW) - 1];                        // nw
-        context1 += (sigma_n[4 * q1 - 1] | sigma_n[4 * q1 - 2]) << 1;  // (sw | w) << 1
-      }
-      if ((q1 + 1) % QW) {
-        context1 |= sigma_n[4 * (q1 - QW) + 5] << 2;  // nf << 2
-      }
-      decodeSigEMB(MEL_decoder, VLC, context1, u_off, rho, emb_k, emb_1, FIRST_QUAD, dec_table1);
-      if (u_off[FIRST_QUAD] == 0) {
-        assert(emb_k[FIRST_QUAD] == 0 && emb_1[FIRST_QUAD] == 0);
-      }
-      for (int i = 0; i < 4; i++) {
-        sigma_n[4 * q1 + i] = (rho[FIRST_QUAD] >> i) & 1;
-      }
+    // Calculate Emax for the next two quads
+    int32_t Emax0, Emax1;
+    Emax0 = find_max(E_p[-1], E_p[0], E_p[1], E_p[2]);
+    Emax1 = find_max(E_p[1], E_p[2], E_p[3], E_p[4]);
 
-      // calculate context for the current quad
-      context2 = sigma_n[4 * (q2 - QW) + 1];          // n
-      context2 += (sigma_n[4 * (q2 - QW) + 3] << 2);  // ne
-      if (q2 % QW) {
-        context2 |= sigma_n[4 * (q2 - QW) - 1];                        // nw
-        context2 += (sigma_n[4 * q2 - 1] | sigma_n[4 * q2 - 2]) << 1;  // (sw | w) << 1
-      }
-      if ((q2 + 1) % QW) {
-        context2 |= sigma_n[4 * (q2 - QW) + 5] << 2;  // nf << 2
-      }
-      decodeSigEMB(MEL_decoder, VLC, context2, u_off, rho, emb_k, emb_1, SECOND_QUAD, dec_table1);
-      if (u_off[SECOND_QUAD] == 0) {
-        assert(emb_k[SECOND_QUAD] == 0 && emb_1[SECOND_QUAD] == 0);
-      }
-      for (int i = 0; i < 4; i++) {
-        sigma_n[4 * q2 + i] = (rho[SECOND_QUAD] >> i) & 1;
+    // calculate context for the next quad
+    context = ((rho1 & 0x4) << 6) | ((rho1 & 0x8) << 5);            // (w | sw) << 8
+    context |= ((rho_p[-1] & 0x8) << 4) | ((rho_p[0] & 0x2) << 6);  // (nw | n) << 7
+    context |= ((rho_p[0] & 0x8) << 6) | ((rho_p[1] & 0x2) << 8);   // (ne | nf) << 9
+
+    for (qx = 0; qx < QW - 1; qx += 2) {
+      // Decoding of significance and EMB patterns and unsigned residual offsets
+      vlcval       = VLC_dec.fetch();
+      uint16_t tv0 = dec_table1[(vlcval & 0x7F) + (static_cast<unsigned int>(context))];
+      if (context == 0) {
+        mel_run -= 2;
+        tv0 = (mel_run == -1) ? tv0 : 0;
+        if (mel_run < 0) {
+          mel_run = MEL.get_run();
+        }
       }
 
-      if (u_off[FIRST_QUAD] == 1 && u_off[SECOND_QUAD] == 1) {
-        u_pfx[FIRST_QUAD]  = VLC.decodeUPrefix();
-        u_pfx[SECOND_QUAD] = VLC.decodeUPrefix();
-        u_sfx[FIRST_QUAD]  = VLC.decodeUSuffix(u_pfx[FIRST_QUAD]);
-        u_sfx[SECOND_QUAD] = VLC.decodeUSuffix(u_pfx[SECOND_QUAD]);
-        u_ext[FIRST_QUAD]  = VLC.decodeUExtension(u_sfx[FIRST_QUAD]);
-        u_ext[SECOND_QUAD] = VLC.decodeUExtension(u_sfx[SECOND_QUAD]);
-        u[FIRST_QUAD]      = u_pfx[FIRST_QUAD] + u_sfx[FIRST_QUAD] + (u_ext[FIRST_QUAD] << 2);
-        u[SECOND_QUAD]     = u_pfx[SECOND_QUAD] + u_sfx[SECOND_QUAD] + (u_ext[SECOND_QUAD] << 2);
-      } else if (u_off[FIRST_QUAD] == 1 && u_off[SECOND_QUAD] == 0) {
-        u_pfx[FIRST_QUAD] = VLC.decodeUPrefix();
-        u_sfx[FIRST_QUAD] = VLC.decodeUSuffix(u_pfx[FIRST_QUAD]);
-        u_ext[FIRST_QUAD] = VLC.decodeUExtension(u_sfx[FIRST_QUAD]);
-        u[FIRST_QUAD]     = u_pfx[FIRST_QUAD] + u_sfx[FIRST_QUAD] + (u_ext[FIRST_QUAD] << 2);
-        u[SECOND_QUAD]    = 0;
-      } else if (u_off[FIRST_QUAD] == 0 && u_off[SECOND_QUAD] == 1) {
-        u_pfx[SECOND_QUAD] = VLC.decodeUPrefix();
-        u_sfx[SECOND_QUAD] = VLC.decodeUSuffix(u_pfx[SECOND_QUAD]);
-        u_ext[SECOND_QUAD] = VLC.decodeUExtension(u_sfx[SECOND_QUAD]);
-        u[FIRST_QUAD]      = 0;
-        u[SECOND_QUAD]     = u_pfx[SECOND_QUAD] + u_sfx[SECOND_QUAD] + (u_ext[SECOND_QUAD] << 2);
-      } else {
-        u[FIRST_QUAD]  = 0;
-        u[SECOND_QUAD] = 0;
-      }
-      if (rho[FIRST_QUAD] == 0 || rho[FIRST_QUAD] == 1 || rho[FIRST_QUAD] == 2 || rho[FIRST_QUAD] == 4
-          || rho[FIRST_QUAD] == 8) {
-        gamma[FIRST_QUAD] = 0;
-      } else {
-        gamma[FIRST_QUAD] = 1;
-      }
-      if (rho[SECOND_QUAD] == 0 || rho[SECOND_QUAD] == 1 || rho[SECOND_QUAD] == 2 || rho[SECOND_QUAD] == 4
-          || rho[SECOND_QUAD] == 8) {
-        gamma[SECOND_QUAD] = 0;
-      } else {
-        gamma[SECOND_QUAD] = 1;
+      rho0    = static_cast<uint8_t>((tv0 & 0x00F0) >> 4);
+      emb_1_0 = static_cast<uint8_t>((tv0 & 0x0F00) >> 8);
+      emb_k_0 = static_cast<uint8_t>((tv0 & 0xF000) >> 12);
+
+      vlcval = VLC_dec.advance(static_cast<uint8_t>((tv0 & 0x000F) >> 1));
+
+      // calculate context for the next quad
+      context = ((rho0 & 0x4) << 6) | ((rho0 & 0x8) << 5);           // (w | sw) << 8
+      context |= ((rho_p[0] & 0x8) << 4) | ((rho_p[1] & 0x2) << 6);  // (nw | n) << 7
+      context |= ((rho_p[1] & 0x8) << 6) | ((rho_p[2] & 0x2) << 8);  // (ne | nf) << 9
+
+      // Decoding of significance and EMB patterns and unsigned residual offsets
+      uint16_t tv1 = dec_table1[(vlcval & 0x7F) + (static_cast<unsigned int>(context))];
+      if (context == 0) {
+        mel_run -= 2;
+        tv1 = (mel_run == -1) ? tv1 : 0;
+        if (mel_run < 0) {
+          mel_run = MEL.get_run();
+        }
       }
 
-      E_n[FIRST_QUAD]   = E[4 * (q1 - QW) + 1];
-      E_n[SECOND_QUAD]  = E[4 * (q2 - QW) + 1];
-      E_ne[FIRST_QUAD]  = E[4 * (q1 - QW) + 3];
-      E_ne[SECOND_QUAD] = E[4 * (q2 - QW) + 3];
-      if (q1 % QW) {
-        E_nw[FIRST_QUAD] = E[4 * (q1 - QW) - 1];
-      } else {
-        E_nw[FIRST_QUAD] = 0;
-      }
-      if (q2 % QW) {
-        E_nw[SECOND_QUAD] = E[4 * (q2 - QW) - 1];
-      } else {
-        E_nw[SECOND_QUAD] = 0;
-      }
-      if ((q1 + 1) % QW) {
-        E_nf[FIRST_QUAD] = E[4 * (q1 - QW) + 5];
-      } else {
-        E_nf[FIRST_QUAD] = 0;
-      }
-      if ((q2 + 1) % QW) {
-        E_nf[SECOND_QUAD] = E[4 * (q2 - QW) + 5];
-      } else {
-        E_nf[SECOND_QUAD] = 0;
-      }
-      max_E[FIRST_QUAD] = std::max({E_nw[FIRST_QUAD], E_n[FIRST_QUAD], E_ne[FIRST_QUAD], E_nf[FIRST_QUAD]});
-      max_E[SECOND_QUAD] =
-          std::max({E_nw[SECOND_QUAD], E_n[SECOND_QUAD], E_ne[SECOND_QUAD], E_nf[SECOND_QUAD]});
+      rho1    = static_cast<uint8_t>((tv1 & 0x00F0) >> 4);
+      emb_1_1 = static_cast<uint8_t>((tv1 & 0x0F00) >> 8);
+      emb_k_1 = static_cast<uint8_t>((tv1 & 0xF000) >> 12);
 
-      kappa[FIRST_QUAD]  = (1 > gamma[FIRST_QUAD] * (max_E[FIRST_QUAD] - 1))
-                               ? 1
-                               : gamma[FIRST_QUAD] * (max_E[FIRST_QUAD] - 1);
-      kappa[SECOND_QUAD] = (1 > gamma[SECOND_QUAD] * (max_E[SECOND_QUAD] - 1))
-                               ? 1
-                               : gamma[SECOND_QUAD] * (max_E[SECOND_QUAD] - 1);
-      U[FIRST_QUAD]      = kappa[FIRST_QUAD] + u[FIRST_QUAD];
-      U[SECOND_QUAD]     = kappa[SECOND_QUAD] + u[SECOND_QUAD];
+      // calculate context for the next quad
+      context = ((rho1 & 0x4) << 6) | ((rho1 & 0x8) << 5);           // (w | sw) << 8
+      context |= ((rho_p[1] & 0x8) << 4) | ((rho_p[2] & 0x2) << 6);  // (nw | n) << 7
+      context |= ((rho_p[2] & 0x8) << 6) | ((rho_p[3] & 0x2) << 8);  // (ne | nf) << 9
 
-      for (int i = 0; i < 4; i++) {
-        m[FIRST_QUAD][i]  = sigma_n[4 * q1 + i] * U[FIRST_QUAD] - ((emb_k[FIRST_QUAD] >> i) & 1);
-        m[SECOND_QUAD][i] = sigma_n[4 * q2 + i] * U[SECOND_QUAD] - ((emb_k[SECOND_QUAD] >> i) & 1);
+      vlcval = VLC_dec.advance(static_cast<uint8_t>((tv1 & 0x000F) >> 1));
+
+      for (uint32_t i = 0; i < 4; i++) {
+        sigma_quads[i] = (rho0 >> i) & 1;
       }
+      for (uint32_t i = 0; i < 4; i++) {
+        sigma_quads[i + 4] = (rho1 >> i) & 1;
+      }
+
+      u_off0       = tv0 & 1;
+      u_off1       = tv1 & 1;
+      uint32_t idx = (vlcval & 0x3F) + (u_off0 << 6U) + (u_off1 << 7U);
+
+      int32_t uvlc_result = uvlc_dec_1[idx];
+      // remove total prefix length
+      vlcval = VLC_dec.advance(uvlc_result & 0x7);
+      uvlc_result >>= 3;
+      // extract suffixes for quad 0 and 1
+      uint32_t len = uvlc_result & 0xF;            // suffix length for 2 quads (up to 10 = 5 + 5)
+      uint32_t tmp = vlcval & ((1U << len) - 1U);  // suffix value for 2 quads
+      vlcval       = VLC_dec.advance(len);
+      uvlc_result >>= 4;
+      // quad 0 length
+      len = uvlc_result & 0x7;  // quad 0 suffix length
+      uvlc_result >>= 3;
+      u0 = (uvlc_result & 7) + (tmp & ~(0xFFU << len));
+      u1 = static_cast<uint32_t>(uvlc_result >> 3) + (tmp >> len);
+
+      gamma0 = (popcount32(static_cast<uint32_t>(rho0)) < 2) ? 0 : 1;
+      gamma1 = (popcount32(static_cast<uint32_t>(rho1)) < 2) ? 0 : 1;
+      kappa0 = (1 > gamma0 * (Emax0 - 1)) ? 1U : static_cast<uint8_t>(gamma0 * (Emax0 - 1));
+      kappa1 = (1 > gamma1 * (Emax1 - 1)) ? 1U : static_cast<uint8_t>(gamma1 * (Emax1 - 1));
+      U0     = kappa0 + u0;
+      U1     = kappa1 + u1;
+
+      for (uint32_t i = 0; i < 4; i++) {
+        m_quads[i]     = sigma_quads[i] * U0 - ((emb_k_0 >> i) & 1);
+        m_quads[i + 4] = sigma_quads[i + 4] * U1 - ((emb_k_1 >> i) & 1);
+      }
+
       // recoverMagSgnValue
-      int32_t n;
-      for (int i = 0; i < 4; i++) {
-        n                   = 4 * q1 + i;
-        m_n[FIRST_QUAD]     = m[FIRST_QUAD][i];
-        known_1[FIRST_QUAD] = (emb_1[FIRST_QUAD] >> i) & 1;
-        v[FIRST_QUAD][i]    = MS.decodeMagSgnValue(m_n[FIRST_QUAD], known_1[FIRST_QUAD]);
+      for (uint32_t i = 0; i < 8; i++) {
+        msval[i] = MagSgn.fetch();
+        MagSgn.advance(m_quads[i]);
+      }
 
-        if (m_n[FIRST_QUAD] != 0) {
-          E[n]    = 32 - count_leading_zeros(v[FIRST_QUAD][i]);
-          mu_n[n] = (v[FIRST_QUAD][i] >> 1) + 1;
-          mu_n[n] <<= pLSB;
-          mu_n[n] |= (v[FIRST_QUAD][i] & 1) << 31;  // sign bit
+      for (uint32_t i = 0; i < 4; i++) {
+        known_1[Q0] = (emb_1_0 >> i) & 1;
+        v_quads[i]  = msval[i] & ((1 << m_quads[i]) - 1);
+        v_quads[i] |= known_1[Q0] << m_quads[i];
+        if (m_quads[i] != 0) {
+          mu_quads[i] = static_cast<uint32_t>((v_quads[i] >> 1) + 1);
+          mu_quads[i] <<= pLSB;
+          mu_quads[i] |= static_cast<uint32_t>((v_quads[i] & 1) << 31);  // sign bit
         } else {
-          // mu_n[n] = 0;
-          // E[n]  = 0;
+          mu_quads[i] = 0;
         }
       }
-      for (int i = 0; i < 4; i++) {
-        n                    = 4 * q2 + i;
-        m_n[SECOND_QUAD]     = m[SECOND_QUAD][i];
-        known_1[SECOND_QUAD] = (emb_1[SECOND_QUAD] >> i) & 1;
-        v[SECOND_QUAD][i]    = MS.decodeMagSgnValue(m_n[SECOND_QUAD], known_1[SECOND_QUAD]);
-        if (m_n[SECOND_QUAD] != 0) {
-          E[n]    = 32 - count_leading_zeros(v[SECOND_QUAD][i]);
-          mu_n[n] = (v[SECOND_QUAD][i] >> 1) + 1;
-          mu_n[n] <<= pLSB;
-          mu_n[n] |= (v[SECOND_QUAD][i] & 1) << 31;  // sign bit
+      for (uint32_t i = 0; i < 4; i++) {
+        known_1[Q1]    = (emb_k_1 >> i) & 1;
+        v_quads[i + 4] = msval[i + 4] & ((1 << m_quads[i + 4]) - 1);
+        v_quads[i + 4] |= known_1[Q1] << m_quads[i + 4];
+        if (m_quads[i + 4] != 0) {
+          mu_quads[i + 4] = static_cast<uint32_t>((v_quads[i + 4] >> 1) + 1);
+          mu_quads[i + 4] <<= pLSB;
+          mu_quads[i + 4] |= static_cast<uint32_t>((v_quads[i + 4] & 1) << 31);  // sign bit
         } else {
-          // mu_n[n] = 0;
-          // E[n]  = 0;
+          mu_quads[i + 4] = 0;
         }
       }
-      q += 2;  // move to the next quad-pair
+      *mp0++ = static_cast<int>(mu_quads[0]);
+      *mp0++ = static_cast<int>(mu_quads[2]);
+      *mp0++ = static_cast<int>(mu_quads[0 + 4]);
+      *mp0++ = static_cast<int>(mu_quads[2 + 4]);
+      *mp1++ = static_cast<int>(mu_quads[1]);
+      *mp1++ = static_cast<int>(mu_quads[3]);
+      *mp1++ = static_cast<int>(mu_quads[1 + 4]);
+      *mp1++ = static_cast<int>(mu_quads[3 + 4]);
+
+      *sp0++ = (rho0 >> 0) & 1;
+      *sp0++ = (rho0 >> 2) & 1;
+      *sp0++ = (rho1 >> 0) & 1;
+      *sp0++ = (rho1 >> 2) & 1;
+      *sp1++ = (rho0 >> 1) & 1;
+      *sp1++ = (rho0 >> 3) & 1;
+      *sp1++ = (rho1 >> 1) & 1;
+      *sp1++ = (rho1 >> 3) & 1;
+
+      *rho_p++ = rho0;
+      *rho_p++ = rho1;
+
+      Emax0  = find_max(E_p[3], E_p[4], E_p[5], E_p[6]);
+      Emax1  = find_max(E_p[5], E_p[6], E_p[7], E_p[8]);
+      E_p[0] = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[1])));
+      E_p[1] = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[3])));
+      E_p[2] = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[5])));
+      E_p[3] = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[7])));
+      E_p += 4;
     }
     // if QW is odd number ..
     if (QW % 2 == 1) {
-      q1 = q;
-      // calculate context for the current quad
-      context1 = sigma_n[4 * (q1 - QW) + 1];          // n
-      context1 += (sigma_n[4 * (q1 - QW) + 3] << 2);  // ne
-      if (q1 % QW) {
-        context1 |= sigma_n[4 * (q1 - QW) - 1];                        // nw
-        context1 += (sigma_n[4 * q1 - 1] | sigma_n[4 * q1 - 2]) << 1;  // (sw | w) << 1
-      }
-      if ((q1 + 1) % QW) {
-        context1 |= sigma_n[4 * (q1 - QW) + 5] << 2;  // nf << 2
-      }
-      decodeSigEMB(MEL_decoder, VLC, context1, u_off, rho, emb_k, emb_1, FIRST_QUAD, dec_table1);
-      if (u_off[FIRST_QUAD] == 0) {
-        assert(emb_k[FIRST_QUAD] == 0 && emb_1[FIRST_QUAD] == 0);
-      }
-      for (int i = 0; i < 4; i++) {
-        sigma_n[4 * q1 + i] = (rho[FIRST_QUAD] >> i) & 1;
-      }
-
-      if (u_off[FIRST_QUAD] == 1) {
-        u_pfx[FIRST_QUAD] = VLC.decodeUPrefix();
-        u_sfx[FIRST_QUAD] = VLC.decodeUSuffix(u_pfx[FIRST_QUAD]);
-        u_ext[FIRST_QUAD] = VLC.decodeUExtension(u_sfx[FIRST_QUAD]);
-        u[FIRST_QUAD]     = u_pfx[FIRST_QUAD] + u_sfx[FIRST_QUAD] + (u_ext[FIRST_QUAD] << 2);
-      } else {
-        u[FIRST_QUAD] = 0;
-      }
-
-      if (rho[FIRST_QUAD] == 0 || rho[FIRST_QUAD] == 1 || rho[FIRST_QUAD] == 2 || rho[FIRST_QUAD] == 4
-          || rho[FIRST_QUAD] == 8) {
-        gamma[FIRST_QUAD] = 0;
-      } else {
-        gamma[FIRST_QUAD] = 1;
-      }
-
-      E_n[FIRST_QUAD]  = E[4 * (q1 - QW) + 1];
-      E_ne[FIRST_QUAD] = E[4 * (q1 - QW) + 3];
-      if (q1 % QW) {
-        E_nw[FIRST_QUAD] = E[4 * (q1 - QW) - 1];
-      } else {
-        E_nw[FIRST_QUAD] = 0;
-      }
-      if ((q1 + 1) % QW) {
-        E_nf[FIRST_QUAD] = E[4 * (q1 - QW) + 5];
-      } else {
-        E_nf[FIRST_QUAD] = 0;
-      }
-      max_E[FIRST_QUAD] = std::max({E_nw[FIRST_QUAD], E_n[FIRST_QUAD], E_ne[FIRST_QUAD], E_nf[FIRST_QUAD]});
-
-      kappa[FIRST_QUAD] = (1 > gamma[FIRST_QUAD] * (max_E[FIRST_QUAD] - 1))
-                              ? 1
-                              : gamma[FIRST_QUAD] * (max_E[FIRST_QUAD] - 1);
-
-      U[FIRST_QUAD] = kappa[FIRST_QUAD] + u[FIRST_QUAD];
-
-      for (int i = 0; i < 4; i++) {
-        m[FIRST_QUAD][i] = sigma_n[4 * q1 + i] * U[FIRST_QUAD] - ((emb_k[FIRST_QUAD] >> i) & 1);
-      }
-      // recoverMagSgnValue
-      int32_t n;
-      for (int i = 0; i < 4; i++) {
-        n                   = 4 * q1 + i;
-        m_n[FIRST_QUAD]     = m[FIRST_QUAD][i];
-        known_1[FIRST_QUAD] = (emb_1[FIRST_QUAD] >> i) & 1;
-        v[FIRST_QUAD][i]    = MS.decodeMagSgnValue(m_n[FIRST_QUAD], known_1[FIRST_QUAD]);
-
-        if (m_n[FIRST_QUAD] != 0) {
-          E[n]    = 32 - count_leading_zeros(v[FIRST_QUAD][i]);
-          mu_n[n] = (v[FIRST_QUAD][i] >> 1) + 1;
-          mu_n[n] <<= pLSB;
-          mu_n[n] |= (v[FIRST_QUAD][i] & 1) << 31;
-        } else {
-          // mu_n[n] = 0;
-          // E[n]  = 0;
+      // Decoding of significance and EMB patterns and unsigned residual offsets
+      vlcval      = VLC_dec.fetch();
+      int32_t tv0 = dec_table1[(vlcval & 0x7F) + (static_cast<unsigned int>(context))];
+      if (context == 0) {
+        mel_run -= 2;
+        tv0 = (mel_run == -1) ? tv0 : 0;
+        if (mel_run < 0) {
+          mel_run = MEL.get_run();
         }
       }
-      q++;  // move to the next quad-pair
-    }       // Non-Initial line-pair end
-  }
+      rho0    = static_cast<uint8_t>((tv0 & 0x00F0) >> 4);
+      emb_1_0 = static_cast<uint8_t>((tv0 & 0x0F00) >> 8);
+      emb_k_0 = static_cast<uint8_t>((tv0 & 0xF000) >> 12);
 
-  // convert mu_n and sigma_n into raster-scan by putting buffers defined in codeblock class
-  uint32_t *p_mu             = mu_n.get();
-  uint8_t *p_sigma           = sigma_n.get();
-  const uint16_t is_border_x = block->size.x % 2;
-  const uint16_t is_border_y = block->size.y % 2;
-  auto set_sample            = [block](const uint32_t &symbol, const uint16_t &j1, const uint16_t &j2) {
-    block->sample_buf[j2 + j1 * block->size.x] = static_cast<int32_t>(symbol);
-  };
-  for (int16_t y = 0; y < QH; y++) {
-    for (int16_t x = 0; x < QW; x++) {
-      set_sample(*p_mu, 2 * y, 2 * x);
-      block->modify_state(sigma, *p_sigma, 2 * y, 2 * x);
-      p_mu++;
-      p_sigma++;
-      if (y != QH - 1 || is_border_y == 0) {
-        set_sample(*p_mu, 2 * y + 1, 2 * x);
-        block->modify_state(sigma, *p_sigma, 2 * y + 1, 2 * x);
+      for (uint32_t i = 0; i < 4; i++) {
+        sigma_quads[i] = (rho0 >> i) & 1;
       }
-      p_mu++;
-      p_sigma++;
-      if (x != QW - 1 || is_border_x == 0) {
-        set_sample(*p_mu, 2 * y, 2 * x + 1);
-        block->modify_state(sigma, *p_sigma, 2 * y, 2 * x + 1);
+
+      vlcval = VLC_dec.advance(static_cast<uint8_t>((tv0 & 0x000F) >> 1));
+      u_off0 = tv0 & 1;
+
+      uint32_t idx        = (vlcval & 0x3F) + (u_off0 << 6U);
+      int32_t uvlc_result = uvlc_dec_0[idx];
+      // remove total prefix length
+      vlcval = VLC_dec.advance(uvlc_result & 0x7);
+      uvlc_result >>= 3;
+      // extract suffixes for quad 0 and 1
+      uint32_t len = uvlc_result & 0xF;            // suffix length for 2 quads (up to 10 = 5 + 5)
+      uint32_t tmp = vlcval & ((1U << len) - 1U);  // suffix value for 2 quads
+      vlcval       = VLC_dec.advance(len);
+      uvlc_result >>= 4;
+      // quad 0 length
+      len = uvlc_result & 0x7;  // quad 0 suffix length
+      uvlc_result >>= 3;
+      u0 = (uvlc_result & 7) + (tmp & ~(0xFFU << len));
+
+      gamma0 = (popcount32(static_cast<uint32_t>(rho0)) < 2) ? 0 : 1;
+      kappa0 = (1 > gamma0 * (Emax0 - 1)) ? 1U : static_cast<uint8_t>(gamma0 * (Emax0 - 1));
+      U0     = kappa0 + u0;
+
+      for (uint32_t i = 0; i < 4; i++) {
+        m_quads[i] = sigma_quads[i] * U0 - ((emb_k_0 >> i) & 1);
       }
-      p_mu++;
-      p_sigma++;
-      if ((y != QH - 1 || is_border_y == 0) && (x != QW - 1 || is_border_x == 0)) {
-        set_sample(*p_mu, 2 * y + 1, 2 * x + 1);
-        block->modify_state(sigma, *p_sigma, 2 * y + 1, 2 * x + 1);
+
+      // recoverMagSgnValue
+      for (uint32_t i = 0; i < 4; i++) {
+        msval[i] = MagSgn.fetch();
+        MagSgn.advance(m_quads[i]);
       }
-      p_mu++;
-      p_sigma++;
+
+      for (uint32_t i = 0; i < 4; i++) {
+        known_1[Q0] = (emb_1_0 >> i) & 1;
+        v_quads[i]  = msval[i] & ((1 << m_quads[i]) - 1);
+        v_quads[i] |= known_1[Q0] << m_quads[i];
+        if (m_quads[i] != 0) {
+          mu_quads[i] = static_cast<uint32_t>((v_quads[i] >> 1) + 1);
+          mu_quads[i] <<= pLSB;
+          mu_quads[i] |= static_cast<uint32_t>((v_quads[i] & 1) << 31);  // sign bit
+        } else {
+          mu_quads[i] = 0;
+        }
+      }
+      *mp0++ = static_cast<int>(mu_quads[0]);
+      *mp0++ = static_cast<int>(mu_quads[2]);
+      *mp1++ = static_cast<int>(mu_quads[1]);
+      *mp1++ = static_cast<int>(mu_quads[3]);
+      E_p[0] = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[1])));
+      E_p[1] = static_cast<int32_t>(32 - count_leading_zeros(static_cast<uint32_t>(v_quads[3])));
+
+      *sp0++ = (rho0 >> 0) & 1;
+      *sp0++ = (rho0 >> 2) & 1;
+      *sp1++ = (rho0 >> 1) & 1;
+      *sp1++ = (rho0 >> 3) & 1;
+
+      *rho_p++ = rho0;
+      E_p += 2;
     }
-  }
+  }  // Non-Initial line-pair end
 }
 
-auto process_stripes_block = [](SP_dec &SigProp, j2k_codeblock *block, const uint16_t i_start,
-                                const uint16_t j_start, const uint16_t width, const uint16_t height,
-                                const uint16_t dum_stride, const uint8_t &pLSB) {
+auto process_stripes_block_dec = [](SP_dec &SigProp, j2k_codeblock *block, const int32_t i_start,
+                                    const int32_t j_start, const uint16_t width, const uint16_t height,
+                                    const uint8_t &pLSB) {
   int32_t *sp;
   uint8_t causal_cond = 0;
   uint8_t bit;
   uint8_t mbr;
-  uint32_t mbr_info;
+  const auto block_width  = static_cast<uint16_t>(j_start + width);
+  const auto block_height = static_cast<uint16_t>(i_start + height);
 
-  for (int16_t j = j_start; j < j_start + width; j++) {
-    mbr_info = 0;
-    //    for (int16_t i = height; i > -2; --i) {
-    //      causal_cond = (((block->Cmodes & CAUSAL) == 0) || (i != height));
-    //      mbr_info <<= 3;
-    //      mbr_info |= (block->get_sigma(i_start + i, j - 1) + (block->get_sigma(i_start + i, j) << 1)
-    //                   + (block->get_sigma(i_start + i, j + 1) << 2))
-    //                  * causal_cond;
-    //    }
-    for (int16_t i = i_start; i < i_start + height; i++) {
-      sp          = &block->sample_buf[j + i * block->size.x];
-      causal_cond = (((block->Cmodes & CAUSAL) == 0) || (i != i_start + height - 1));
+  for (int16_t j = (int16_t)j_start; j < block_width; j++) {
+    for (int16_t i = (int16_t)i_start; i < block_height; i++) {
+      sp = &block->sample_buf[static_cast<size_t>(j) + static_cast<size_t>(i) * block->size.x];
+      causal_cond = (((block->Cmodes & CAUSAL) == 0) || (i != block_height - 1));
       mbr         = 0;
       if (block->get_state(Sigma, i, j) == 0) {
-        block->calc_mbr(mbr, i, j, mbr_info & 0x1EF, causal_cond);
+        mbr = block->calc_mbr(i, j, causal_cond);
       }
-      mbr_info >>= 3;
       if (mbr != 0) {
         block->modify_state(refinement_indicator, 1, i, j);
         bit = SigProp.importSigPropBit();
         block->modify_state(refinement_value, bit, i, j);
-        // block->set_refinement_value(bit, i, j);
         *sp |= bit << pLSB;
       }
       block->modify_state(scan, 1, i, j);
-      // block->update_scan_state(1, i, j);
     }
   }
-  for (uint16_t j = j_start; j < j_start + width; j++) {
-    for (uint16_t i = i_start; i < i_start + height; i++) {
-      sp = &block->sample_buf[j + i * block->size.x];
+  for (int16_t j = (int16_t)j_start; j < block_width; j++) {
+    for (int16_t i = (int16_t)i_start; i < block_height; i++) {
+      sp = &block->sample_buf[static_cast<size_t>(j) + static_cast<size_t>(i) * block->size.x];
       // decode sign
       if ((*sp & (1 << pLSB)) != 0) {
         *sp = (*sp & 0x7FFFFFFF) | (SigProp.importSigPropBit() << 31);
@@ -1014,24 +711,23 @@ auto process_stripes_block = [](SP_dec &SigProp, j2k_codeblock *block, const uin
 void ht_sigprop_decode(j2k_codeblock *block, uint8_t *HT_magref_segment, uint32_t magref_length,
                        const uint8_t &pLSB) {
   SP_dec SigProp(HT_magref_segment, magref_length);
-  const uint16_t num_v_stripe = block->size.y / 4;
-  const uint16_t num_h_stripe = block->size.x / 4;
-  uint16_t i_start            = 0, j_start;
+  const uint16_t num_v_stripe = static_cast<uint16_t>(block->size.y / 4);
+  const uint16_t num_h_stripe = static_cast<uint16_t>(block->size.x / 4);
+  int32_t i_start             = 0, j_start;
   uint16_t width              = 4;
   uint16_t width_last;
-  uint16_t height           = 4;
-  const uint16_t dum_stride = block->size.x + 2;
+  uint16_t height = 4;
 
   // decode full-height (=4) stripes
   for (uint16_t n1 = 0; n1 < num_v_stripe; n1++) {
     j_start = 0;
     for (uint16_t n2 = 0; n2 < num_h_stripe; n2++) {
-      process_stripes_block(SigProp, block, i_start, j_start, width, height, dum_stride, pLSB);
+      process_stripes_block_dec(SigProp, block, i_start, j_start, width, height, pLSB);
       j_start += 4;
     }
     width_last = block->size.x % 4;
     if (width_last) {
-      process_stripes_block(SigProp, block, i_start, j_start, width_last, height, dum_stride, pLSB);
+      process_stripes_block_dec(SigProp, block, i_start, j_start, width_last, height, pLSB);
     }
     i_start += 4;
   }
@@ -1039,41 +735,41 @@ void ht_sigprop_decode(j2k_codeblock *block, uint8_t *HT_magref_segment, uint32_
   height  = block->size.y % 4;
   j_start = 0;
   for (uint16_t n2 = 0; n2 < num_h_stripe; n2++) {
-    process_stripes_block(SigProp, block, i_start, j_start, width, height, dum_stride, pLSB);
+    process_stripes_block_dec(SigProp, block, i_start, j_start, width, height, pLSB);
     j_start += 4;
   }
   width_last = block->size.x % 4;
   if (width_last) {
-    process_stripes_block(SigProp, block, i_start, j_start, width_last, height, dum_stride, pLSB);
+    process_stripes_block_dec(SigProp, block, i_start, j_start, width_last, height, pLSB);
   }
 }
 
 void ht_magref_decode(j2k_codeblock *block, uint8_t *HT_magref_segment, uint32_t magref_length,
                       const uint8_t &pLSB) {
   MR_dec MagRef(HT_magref_segment, magref_length);
-  const uint16_t blk_height   = block->size.y;
-  const uint16_t blk_width    = block->size.x;
-  const uint16_t num_v_stripe = block->size.y / 4;
-  uint16_t i_start            = 0;
-  uint16_t height             = 4;
+  const uint16_t blk_height   = static_cast<uint16_t>(block->size.y);
+  const uint16_t blk_width    = static_cast<uint16_t>(block->size.x);
+  const uint16_t num_v_stripe = static_cast<uint16_t>(block->size.y / 4);
+  int16_t i_start             = 0;
+  int16_t height              = 4;
   int32_t *sp;
 
-  for (uint16_t n1 = 0; n1 < num_v_stripe; n1++) {
-    for (uint16_t j = 0; j < blk_width; j++) {
-      for (uint16_t i = i_start; i < i_start + height; i++) {
-        sp = &block->sample_buf[j + i * block->size.x];
+  for (int16_t n1 = 0; n1 < num_v_stripe; n1++) {
+    for (int16_t j = 0; j < blk_width; j++) {
+      for (int16_t i = i_start; i < i_start + height; i++) {
+        sp = &block->sample_buf[static_cast<size_t>(j) + static_cast<size_t>(i) * block->size.x];
         if (block->get_state(Sigma, i, j) != 0) {
           block->modify_state(refinement_indicator, 1, i, j);
           sp[0] |= MagRef.importMagRefBit() << pLSB;
         }
       }
     }
-    i_start += 4;
+    i_start = static_cast<int16_t>(i_start + 4);
   }
-  height = blk_height % 4;
-  for (uint16_t j = 0; j < blk_width; j++) {
-    for (uint16_t i = i_start; i < i_start + height; i++) {
-      sp = &block->sample_buf[j + i * block->size.x];
+  height = static_cast<int16_t>(blk_height % 4);
+  for (int16_t j = 0; j < blk_width; j++) {
+    for (int16_t i = i_start; i < i_start + height; i++) {
+      sp = &block->sample_buf[static_cast<size_t>(j) + static_cast<size_t>(i) * block->size.x];
       if (block->get_state(Sigma, i, j) != 0) {
         block->modify_state(refinement_indicator, 1, i, j);
         sp[0] |= MagRef.importMagRefBit() << pLSB;
@@ -1082,20 +778,120 @@ void ht_magref_decode(j2k_codeblock *block, uint8_t *HT_magref_segment, uint32_t
   }
 }
 
-void htj2k_decode(j2k_codeblock *block, const uint8_t ROIshift) {
+void j2k_codeblock::dequantize(uint8_t S_blk, uint8_t ROIshift) const {
+  /* ready for ROI adjustment and dequantization */
+
+  // number of decoded magnitude bit‐planes
+  const int32_t pLSB = 31 - M_b;  // indicates binary point;
+
+  // bit mask for ROI detection
+  const uint32_t mask = UINT32_MAX >> (M_b + 1);
+  // reconstruction parameter defined in E.1.1.2 of the spec
+
+  float fscale = this->stepsize;
+  fscale *= (1 << FRACBITS);
+  if (M_b <= 31) {
+    fscale /= (static_cast<float>(1 << (31 - M_b)));
+  } else {
+    fscale *= (static_cast<float>(1 << (M_b - 31)));
+  }
+  constexpr int32_t downshift = 15;
+  fscale *= (float)(1 << 16) * (float)(1 << downshift);
+  const auto scale = (int32_t)(fscale + 0.5);
+  if (this->transformation) {
+    // lossless path
+    for (size_t i = 0; i < static_cast<size_t>(this->size.y); i++) {
+      int32_t *val      = this->sample_buf.get() + i * this->size.x;
+      uint32_t *dst      = this->i_samples + i * this->band_stride;
+      uint8_t *blkstate = this->block_states.get() + (i + 1) * this->blkstate_stride + 1;
+
+      for (size_t j = 0; j < static_cast<size_t>(this->size.x); j++) {
+        int32_t sign = *val & INT32_MIN;
+        *val &= INT32_MAX;
+        // detect background region and upshift it
+        if (ROIshift && (((uint32_t)*val & ~mask) == 0)) {
+          *val <<= ROIshift;
+        }
+        // do adjustment of the position indicating 0.5
+        int32_t N_b = S_blk + 1 + ((*blkstate >> 2) & 1);
+        if (ROIshift) {
+          N_b = M_b;
+        }
+        if (N_b < M_b && *val) {
+          *val |= 1 << (31 - N_b - 1);
+        }
+        // bring sign back
+        *val |= sign;
+        // convert sign-magnitude to two's complement form
+        if (*val < 0) {
+          *val = -(*val & INT32_MAX);
+        }
+
+        assert(pLSB >= 0);  // assure downshift is not negative
+        *dst = static_cast<int16_t>(*val >> pLSB);
+        val++;
+        dst++;
+        blkstate++;
+      }
+    }
+  } else {
+    // lossy path
+    [[maybe_unused]] int32_t ROImask = 0;
+    if (ROIshift) {
+      ROImask = static_cast<int32_t>(0xFFFFFFFF);
+    }
+    //    auto vROIshift = vdupq_n_s32(ROImask);
+    for (size_t i = 0; i < static_cast<size_t>(this->size.y); i++) {
+      int32_t *val      = this->sample_buf.get() + i * this->size.x;
+      uint32_t *dst      = this->i_samples + i * this->band_stride;
+      uint8_t *blkstate = this->block_states.get() + (i + 1) * this->blkstate_stride + 1;
+
+      for (size_t j = 0; j < static_cast<size_t>(this->size.x); j++) {
+        int32_t sign = *val & INT32_MIN;
+        *val &= INT32_MAX;
+        // detect background region and upshift it
+        if (ROIshift && (((uint32_t)*val & ~mask) == 0)) {
+          *val <<= ROIshift;
+        }
+        // do adjustment of the position indicating 0.5
+        int32_t N_b = S_blk + 1 + ((*blkstate >> 2) & 1);
+        if (ROIshift) {
+          N_b = M_b;
+        }
+        if (*val) {
+          *val |= 1 << (31 - N_b - 1);
+        }
+
+        // to prevent overflow, truncate to int16_t
+        *val = (*val + (1 << 15)) >> 16;
+        //  dequantization
+        *val *= scale;
+        // downshift
+        *dst = (int16_t)((*val + (1 << (downshift - 1))) >> downshift);
+        // convert sign-magnitude to two's complement form
+        if (sign) {
+          *dst = static_cast<int16_t>(-(*dst));
+        }
+        val++;
+        dst++;
+        blkstate++;
+      }
+    }
+  }
+}
+
+void htj2k_decode(j2k_codeblock *block, uint8_t ROIshift) {
   // number of placeholder pass
   uint8_t P0 = 0;
   // length of HT Cleanup segment
-  uint32_t Lcup = 0;
+  int32_t Lcup = 0;
   // length of HT Refinement segment
   uint32_t Lref = 0;
   // number of HT Sets preceding the given(this) HT Set
   const uint8_t S_skip = 0;
 
-  const int32_t M_b = static_cast<int32_t>(block->get_Mb());
-
   if (block->num_passes > 3) {
-    for (int i = 0; i < block->pass_length.size(); i++) {
+    for (uint32_t i = 0; i < block->pass_length.size(); i++) {
       if (block->pass_length[i] != 0) {
         break;
       }
@@ -1107,13 +903,14 @@ void htj2k_decode(j2k_codeblock *block, const uint8_t ROIshift) {
   } else {
     P0 = 0;
   }
-  const uint8_t empty_passes = P0 * 3;
+  const uint8_t empty_passes = static_cast<uint8_t>(P0 * 3);
   if (block->num_passes < empty_passes) {
-    printf("ERROR: number of placeholde passes is too large.\n");
-    //exit(EXIT_FAILURE);
+    printf("WARNING: number of passes %d exceeds number of empty passes %d", block->num_passes,
+           empty_passes);
+    return;
   }
   // number of ht coding pass (Z_blk in the spec)
-  const uint8_t num_ht_passes = block->num_passes - empty_passes;
+  const uint8_t num_ht_passes = static_cast<uint8_t>(block->num_passes - empty_passes);
   // pointer to buffer for HT Cleanup segment
   uint8_t *Dcup;
   // pointer to buffer for HT Refinement segment
@@ -1122,15 +919,17 @@ void htj2k_decode(j2k_codeblock *block, const uint8_t ROIshift) {
   if (num_ht_passes > 0) {
     std::vector<uint8_t> all_segments;
     all_segments.reserve(3);
-    for (int i = 0; i < block->pass_length.size(); i++) {
+    for (uint32_t i = 0; i < block->pass_length.size(); i++) {
       if (block->pass_length[i] != 0) {
-        all_segments.push_back(i);
+        all_segments.push_back(static_cast<uint8_t>(i));
       }
     }
-    Lcup += block->pass_length[all_segments[0]];
-    if (Lcup < 2)
-    	return;
-    for (int i = 1; i < all_segments.size(); i++) {
+    Lcup += static_cast<int32_t>(block->pass_length[all_segments[0]]);
+    if (Lcup < 2) {
+      printf("WARNING: Cleanup pass length must be at least 2 bytes in length.\n");
+      return;
+    }
+    for (uint32_t i = 1; i < all_segments.size(); i++) {
       Lref += block->pass_length[all_segments[i]];
     }
     Dcup = block->get_compressed_data();
@@ -1141,140 +940,36 @@ void htj2k_decode(j2k_codeblock *block, const uint8_t ROIshift) {
       Dref = nullptr;
     }
     // number of (skipped) magnitude bitplanes
-    const uint8_t S_blk = P0 + block->num_ZBP + S_skip;
-    if (S_blk >= 30)
-    	return;
-    // Suffix length (=MEL + VLC) of HT Cleanup pass
-    const uint32_t Scup = (Dcup[Lcup - 1] << 4) + (Dcup[Lcup - 2] & 0x0F);
-    if (Scup < 2 || Scup > Lcup || Scup > 4079)
+    const uint8_t S_blk = static_cast<uint8_t>(P0 + block->num_ZBP + S_skip);
+    if (S_blk >= 30) {
+      printf("WARNING: Number of skipped mag bitplanes %d is too large.\n", S_blk);
       return;
-
+    }
+    // Suffix length (=MEL + VLC) of HT Cleanup pass
+    const int32_t Scup = static_cast<int32_t>((Dcup[Lcup - 1] << 4) + (Dcup[Lcup - 2] & 0x0F));
+    if (Scup < 2 || Scup > Lcup || Scup > 4079) {
+      printf("WARNING: cleanup pass suffix length %d is invalid.\n", Scup);
+      return;
+    }
     // modDcup (shall be done before the creation of state_VLC instance)
     Dcup[Lcup - 1] = 0xFF;
     Dcup[Lcup - 2] |= 0x0F;
-    const uint32_t Pcup             = Lcup - Scup;
-    state_MS_dec MS                 = state_MS_dec(Dcup, Pcup);
-    state_MEL_unPacker MEL_unPacker = state_MEL_unPacker(Dcup, Lcup, Pcup);
-    state_MEL_decoder MEL_decoder   = state_MEL_decoder(MEL_unPacker);
-    state_VLC_dec VLC               = state_VLC_dec(Dcup, Lcup, Pcup);
-
-    ht_cleanup_decode(block, Dcup, Lcup, ROIshift, 30 - S_blk, MS, MEL_unPacker, MEL_decoder, VLC);
+    const int32_t Pcup = static_cast<int32_t>(Lcup - Scup);
+    //    state_MS_dec MS     = state_MS_dec(Dcup, Pcup);
+    //    state_MEL_unPacker MEL_unPacker = state_MEL_unPacker(Dcup, Lcup, Pcup);
+    //    state_MEL_decoder MEL_decoder   = state_MEL_decoder(MEL_unPacker);
+    //    state_VLC_dec VLC               = state_VLC_dec(Dcup, Lcup, Pcup);
+    ht_cleanup_decode(block, static_cast<uint8_t>(30 - S_blk), Lcup, Pcup, Scup);
     if (num_ht_passes > 1) {
-      ht_sigprop_decode(block, Dref, Lref, 30 - (S_blk + 1));
+      ht_sigprop_decode(block, Dref, Lref, static_cast<uint8_t>(30 - (S_blk + 1)));
     }
     if (num_ht_passes > 2) {
-      ht_magref_decode(block, Dref, Lref, 30 - (S_blk + 1));
+      ht_magref_decode(block, Dref, Lref, static_cast<uint8_t>(30 - (S_blk + 1)));
     }
 
-    /* ready for ROI adjustment and dequantization */
-    // refinement indicator
-    uint8_t z_n;
-    // number of decoded magnitude bit‐planes
-    int32_t N_b;
-    const int32_t pLSB = 31 - M_b;  // indicates binary point;
+    // dequantization
+    block->dequantize(S_blk, ROIshift);
 
-    // EBCOT_states *p1_states = block->get_p1_states();
-
-    // bit mask for ROI detection
-    const uint32_t mask = UINT32_MAX >> (M_b + 1);
-    // reconstruction parameter defined in E.1.1.2 of the spec
-    int32_t r_val;
-    int32_t offset = 0;
-    int32_t sign;
-    const uint16_t yyy = block->size.y;
-    const uint16_t xxx = block->size.x;
-    if (block->transformation) {
-// reversible path
-#ifdef __INTEL_COMPILER
-  #pragma ivdep
-#endif
-      for (uint16_t y = 0; y < yyy; y++) {
-        for (uint16_t x = 0; x < xxx; x++) {
-          const uint32_t n = x + y * block->band_stride;
-          auto val              = &block->sample_buf[x + y * block->size.x];
-          auto dst              = block->i_samples + n;
-          sign             = *val & INT32_MIN;
-          *val &= INT32_MAX;
-          // detect background region and upshift it
-          if (ROIshift && (((uint32_t)*val & ~mask) == 0)) {
-            *val <<= ROIshift;
-          }
-          // do adjustment of the position indicating 0.5
-          z_n = block->get_state(Refinement_indicator, y, x);
-          // z_n = p1_states->pi_[x + y * block->size.x];
-          // z_n = (p1_states->block_states[x + y * block->size.x] & S_PI_) >> SHIFT_PI_;
-          if (ROIshift) {
-            N_b = M_b;
-          } else {
-            N_b = S_blk + 1 + z_n;
-          }
-          // construct reconstruction value (=0.5)
-          offset = (M_b > N_b) ? M_b - N_b : 0;
-          r_val  = 1 << (pLSB - 1 + offset);
-          // add 0.5 and bring sign back, if necessary
-          if (*val != 0 && N_b < M_b) {
-            *val |= r_val;
-          }
-          // bring sign back
-          *val |= sign;
-          // convert sign-magnitude to two's complement form
-          if (*val < 0) {
-            *val = -(*val & INT32_MAX);
-          }
-
-          //////////////////////////////////////////////////////
-          assert(pLSB >= 0);  // assure downshift is not negative
-          *dst = *val >> pLSB;
-        }
-      }
-    } else {
-// irreversible path
-#ifdef __INTEL_COMPILER
-  #pragma ivdep
-#endif
-      for (uint16_t y = 0; y < yyy; y++) {
-        for (uint16_t x = 0; x < xxx; x++) {
-          const uint32_t n = x + y * block->band_stride;
-          auto val         = &block->sample_buf[x + y * block->size.x];
-          auto dst         = block->i_samples + n;
-          sign             = *val & INT32_MIN;
-          *val &= INT32_MAX;
-          // detect background region and upshift it
-          if (ROIshift && (((uint32_t)*val & ~mask) == 0)) {
-            *val <<= ROIshift;
-          }
-
-          // do adjustment of the position indicating 0.5
-          z_n = block->get_state(Refinement_indicator, y, x);
-          // z_n = p1_states->pi_[x + y * block->size.x];
-          // z_n = (p1_states->block_states[x + y * block->size.x] & S_PI_) >> SHIFT_PI_;
-          if (ROIshift) {
-            N_b = M_b;
-          } else {
-            N_b = S_blk + 1 + z_n;
-          }
-          // construct reconstruction value (=0.5)
-          offset = (M_b > N_b) ? M_b - N_b : 0;
-          r_val  = 1 << (pLSB - 1 + offset);
-          // add 0.5, if necessary
-          if (*val != 0) {
-            *val |= r_val;
-          }
-            // bring sign back
-          *val |= sign;
-          // convert sign-magnitude to two's complement form
-          if (*val < 0) {
-            *val = -(*val & INT32_MAX);
-          }
-
-          *dst = *val;
-        }
-      }
-    }
   }  // end
 }
-
-
-#ifndef _MSC_VER
-#pragma GCC diagnostic pop
 #endif

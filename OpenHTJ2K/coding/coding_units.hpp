@@ -30,17 +30,6 @@
 
 #include <cstdint>
 #include <vector>
-
-#ifndef _MSC_VER
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wconversion"
-#pragma GCC diagnostic ignored "-Wsign-conversion"
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#pragma GCC diagnostic ignored "-Wunused-variable"
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#pragma GCC diagnostic ignored "-Wparentheses"
-#endif
-
 #include "open_htj2k_typedef.hpp"
 #include <cassert>
 #include <string>
@@ -59,9 +48,9 @@ class j2k_region {
   // bottom-right coordinate (exclusive) of a region in the reference grid
   element_siz pos1;
   // return top-left coordinate (inclusive)
-  element_siz get_pos0() const { return pos0; }
+  [[nodiscard]] element_siz get_pos0() const { return pos0; }
   // return bottom-right coordinate (exclusive)
-  element_siz get_pos1() const { return pos1; }
+  [[nodiscard]] element_siz get_pos1() const { return pos1; }
   // get size of a region
   void get_size(element_siz &out) const {
     out.x = pos1.x - pos0.x;
@@ -83,28 +72,31 @@ class j2k_codeblock : public j2k_region {
   const element_siz size;
 
  private:
-  const uint32_t index;
-  const uint8_t band;
-  const uint8_t M_b;
   std::unique_ptr<uint8_t[]> compressed_data;
   uint8_t *current_address;
+  const uint8_t band;
+  const uint8_t M_b;
+  [[maybe_unused]] const uint32_t index;
 
  public:
+  std::unique_ptr<int32_t[]> sample_buf;
+  size_t blksampl_stride;
   std::unique_ptr<uint8_t[]> block_states;
-  const uint8_t R_b;
+  size_t blkstate_stride;
+  uint32_t *const i_samples;
+  const uint32_t band_stride;
+  [[maybe_unused]] const uint8_t R_b;
   const uint8_t transformation;
   const float stepsize;
-  const uint32_t band_stride;
+
   const uint16_t num_layers;
-  std::unique_ptr<int32_t[]> sample_buf;
-  sprec_t *const i_samples;
-  float *const f_samples;
+
   uint32_t length;
   uint16_t Cmodes;
   uint8_t num_passes;
   uint8_t num_ZBP;
   uint8_t fast_skip_passes;
-  uint32_t Lblock;
+  uint8_t Lblock;
   // length of a coding pass in byte
   std::vector<uint32_t> pass_length;
   // index of the coding-pass from which layer starts
@@ -112,36 +104,37 @@ class j2k_codeblock : public j2k_region {
   // number of coding-passes included in a layer
   std::unique_ptr<uint8_t[]> layer_passes;
   bool already_included;
+  bool refsegment;
 
   j2k_codeblock(const uint32_t &idx, uint8_t orientation, uint8_t M_b, uint8_t R_b, uint8_t transformation,
-                float stepsize, uint32_t band_stride, sprec_t *ibuf, float *fbuf, uint32_t offset,
+                float stepsize, uint32_t band_stride, uint32_t *ibuf, uint32_t offset,
                 const uint16_t &numlayers, const uint8_t &codeblock_style, const element_siz &p0,
                 const element_siz &p1, const element_siz &s);
   void modify_state(const std::function<void(uint8_t &, uint8_t)> &callback, uint8_t val, int16_t j1,
                     int16_t j2) {
-    callback(block_states[(j1 + 1) * (size.x + 2) + (j2 + 1)], val);
+    callback(block_states[static_cast<uint32_t>(j1 + 1) * (blkstate_stride) +
+                          static_cast<uint32_t>(j2 + 1)],
+             val);
   }
   uint8_t get_state(const std::function<uint8_t(uint8_t &)> &callback, int16_t j1, int16_t j2) const {
-    return callback(block_states[(j1 + 1) * (size.x + 2) + (j2 + 1)]);
+    return (uint8_t)callback(block_states[static_cast<uint32_t>(j1 + 1) * (blkstate_stride) +
+                                          static_cast<uint32_t>(j2 + 1)]);
   }
   // DEBUG FUNCTION, SOON BE DELETED
-  uint8_t get_orientation() const { return band; }
-  uint8_t get_context_label_sig(const uint16_t &j1, const uint16_t &j2) const;
-  uint8_t get_signLUT_index(const uint16_t &j1, const uint16_t &j2) const;
-  uint8_t get_Mb() const;
+  [[maybe_unused]] [[nodiscard]] uint8_t get_orientation() const { return band; }
+
+  [[nodiscard]] uint8_t get_context_label_sig(const int16_t &j1, const int16_t &j2) const;
+  [[nodiscard]] uint8_t get_signLUT_index(const int16_t &j1, const int16_t &j2) const;
+  [[nodiscard]] uint8_t get_Mb() const;
   uint8_t *get_compressed_data();
-  void set_compressed_data(uint8_t *buf, uint16_t size);
-  float *get_fsample_addr(const int16_t &j1, const int16_t &j2) const;
-  void update_sample(const uint8_t &symbol, const uint8_t &p, const uint16_t &j1, const uint16_t &j2) const;
-  void update_sign(const int8_t &val, const uint16_t &j1, const uint16_t &j2) const;
-  uint8_t get_sign(const uint16_t &j1, const uint16_t &j2) const;
-  void set_MagSgn_and_sigma(uint32_t &or_val);
-  void calc_mbr(uint8_t &mbr, uint16_t i, uint16_t j, uint32_t mbr_info, uint8_t causal_cond) const;
+  void set_compressed_data(uint8_t *buf, uint16_t size, uint16_t Lref = 0);
+  //void create_compressed_buffer(buf_chain *tile_buf, int32_t buf_limit, const uint16_t &layer);
+  void update_sample(const uint8_t &symbol, const uint8_t &p, const int16_t &j1, const int16_t &j2) const;
+  void update_sign(const int8_t &val, const int16_t &j1, const int16_t &j2) const;
+  [[nodiscard]] uint8_t get_sign(const int16_t &j1, const int16_t &j2) const;
+  void quantize(uint32_t &or_val) const;
+  uint8_t calc_mbr(int16_t i, int16_t j, uint8_t causal_cond) const;
+  void dequantize(uint8_t S_blk, uint8_t ROIshift) const;
 };
 
-int32_t htj2k_encode(j2k_codeblock *block, uint8_t ROIshift) noexcept;
-
-
-#ifndef _MSC_VER
-#pragma GCC diagnostic pop
-#endif
+int32_t htj2k_cleanup_encode(j2k_codeblock *block, uint8_t ROIshift) noexcept;

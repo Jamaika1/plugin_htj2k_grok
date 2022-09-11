@@ -38,41 +38,45 @@
  *******************************************************************************/
 
 j2k_codeblock::j2k_codeblock(const uint32_t &idx, uint8_t orientation, uint8_t M_b, uint8_t R_b,
-                             uint8_t transformation, float stepsize, uint32_t band_stride, sprec_t *ibuf,
-                             float *fbuf, uint32_t offset, const uint16_t &numlayers,
+                             uint8_t transformation, float stepsize, uint32_t band_stride, uint32_t *ibuf,
+                             /*float *fbuf,*/ uint32_t offset, const uint16_t &numlayers,
                              const uint8_t &codeblock_style, const element_siz &p0, const element_siz &p1,
                              const element_siz &s)
     : j2k_region(p0, p1),
       // public
       size(s),
       // private
-      index(idx),
-      band(orientation),
-      M_b(M_b),
       compressed_data(nullptr),
       current_address(nullptr),
-      block_states(std::make_unique<uint8_t[]>((size.x + 2) * (size.y + 2))),
-      // public
+      band(orientation),
+      M_b(M_b),
+      index(idx),
+      //  public
+      i_samples(ibuf + offset),
+      band_stride(band_stride),
       R_b(R_b),
       transformation(transformation),
       stepsize(stepsize),
-      band_stride(band_stride),
       num_layers(numlayers),
-      sample_buf(std::make_unique<int32_t[]>(size.x * size.y)),
-      i_samples(ibuf + offset),
-      f_samples(fbuf + offset),
       length(0),
       Cmodes(codeblock_style),
       num_passes(0),
       num_ZBP(0),
       fast_skip_passes(0),
       Lblock(0),
-      already_included(false) {
-  memset(sample_buf.get(), 0, sizeof(int32_t) * size.x * size.y);
-  memset(block_states.get(), 0, (size.x + 2) * (size.y + 2));
-  this->layer_start  = std::make_unique<uint8_t[]>(num_layers);
-  this->layer_passes = std::make_unique<uint8_t[]>(num_layers);
-  this->pass_length.reserve(109);
+      already_included(false),
+      refsegment(false) {
+  const uint32_t QWx2 = round_up(size.x, 8U);  // TODO: needs padding?
+  const uint32_t QHx2 = round_up(size.y, 8U);  // TODO: needs padding?
+  blksampl_stride = QWx2;
+  blkstate_stride = QWx2 + 2;
+  block_states    = MAKE_UNIQUE<uint8_t[]>(static_cast<size_t>(QWx2 + 2) * (QHx2 + 2));
+  memset(block_states.get(), 0, static_cast<size_t>(QWx2 + 2) * (QHx2 + 2));
+  sample_buf = MAKE_UNIQUE<int32_t[]>(static_cast<size_t>(QWx2 * QHx2));
+  memset(sample_buf.get(), 0, sizeof(int32_t) * QWx2 * QHx2);
+  this->layer_start  = MAKE_UNIQUE<uint8_t[]>(num_layers);
+  this->layer_passes = MAKE_UNIQUE<uint8_t[]>(num_layers);
+  if ((Cmodes & 0x40) == 0) this->pass_length.reserve(109);
   this->pass_length = std::vector<uint32_t>(num_layers, 0);  // critical section
 }
 
@@ -80,14 +84,19 @@ uint8_t j2k_codeblock::get_Mb() const { return this->M_b; }
 
 uint8_t *j2k_codeblock::get_compressed_data() { return this->compressed_data.get(); }
 
-void j2k_codeblock::set_compressed_data(uint8_t *buf, uint16_t bufsize) {
+void j2k_codeblock::set_compressed_data(uint8_t *const buf, const uint16_t bufsize, const uint16_t Lref) {
   if (this->compressed_data != nullptr) {
-    printf(
-        "ERROR: illegal attempt to allocate codeblock's compressed data but the data is not "
-        "null.\n");
-    //exit(EXIT_FAILURE);
+    if (!refsegment) {
+      printf(
+          "ERROR: illegal attempt to allocate codeblock's compressed data but the data is not "
+          "null.\n");
+    } else {
+      // if we are here, this function has been called to copy Dref[]
+      memcpy(this->current_address + this->pass_length[0], buf, bufsize);
+      return;
+    }
   }
-  this->compressed_data = std::make_unique<uint8_t[]>(bufsize);
+  this->compressed_data = MAKE_UNIQUE<uint8_t[]>(static_cast<size_t>(bufsize + Lref * (refsegment)));
   memcpy(this->compressed_data.get(), buf, bufsize);
   this->current_address = this->compressed_data.get();
 }
