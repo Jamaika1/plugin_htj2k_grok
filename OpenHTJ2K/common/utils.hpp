@@ -31,22 +31,16 @@
 #include <cstdint>
 #include <cstdlib>
 
-#ifndef _MSC_VER
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wconversion"
-#pragma GCC diagnostic ignored "-Wsign-conversion"
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#pragma GCC diagnostic ignored "-Wunused-variable"
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#pragma GCC diagnostic ignored "-Wparentheses"
-#endif
-
 #define round_up(x, n) (((x) + (n)-1) & (-n))
-#define round_down(x, n) ((x) & (-n))
+#define round_down(x, n) ((x) - ((x) % (n)))
 #define ceil_int(a, b) ((a) + ((b)-1)) / (b)
 
+#if defined(__INTEL_LLVM_COMPILER)
+  #define __INTEL_COMPILER
+#endif
+
 #if defined(__arm64__) || defined(__arm__) || defined(__aarch64__)
-  #include <arm_acle.h>
+  //#include <arm_acle.h>
   #if defined(__ARM_NEON__)
     #include <arm_neon.h>
   #endif
@@ -56,12 +50,23 @@
   #include <x86intrin.h>
 #endif
 
-static inline size_t popcount32(uintmax_t num) {
+template <class T>
+static inline T find_max(T x0, T x1, T x2, T x3) {
+  T v0 = ((x0 > x1) ? x0 : x1);
+  T v1 = ((x2 > x3) ? x2 : x3);
+  return (v0 > v1) ? v0 : v1;
+}
+
+static inline size_t popcount32(uint32_t num) {
   size_t precision = 0;
 #if defined(_MSC_VER)
   precision = __popcnt(static_cast<uint32_t>(num));
 #elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-  precision = _popcnt32(num);
+  precision = static_cast<size_t>(_popcnt32(num));
+#elif defined(__arm64__) || defined(__arm__) || defined(__aarch64__)
+  uint32x2_t val = vld1_dup_u32(static_cast<const uint32_t*>(&num));
+  uint8_t a      = vaddv_u8(vcnt_u8(vreinterpret_u8_u32(val)));
+  precision      = a >> 1;
 #else
   while (num != 0) {
     if (1 == (num & 1)) {
@@ -80,7 +85,7 @@ static inline uint32_t int_log2(const uint32_t x) {
   _BitScanReverse(&tmp, x);
   y = tmp;
 #else
-  y         = 31 - __builtin_clz(x);
+  y         = static_cast<uint32_t>(31 - __builtin_clz(x));
 #endif
   return (x == 0) ? 0 : y;
 }
@@ -94,13 +99,53 @@ static inline uint32_t count_leading_zeros(const uint32_t x) {
 #elif defined(__MINGW32__) || defined(__MINGW64__)
   y      = __builtin_clz(x);
 #elif defined(__ARM_FEATURE_CLZ)
-  y = __builtin_clz(x);
+  y = static_cast<uint32_t>(__builtin_clz(x));
 #else
   y = 31 - int_log2(x);
 #endif
-  return (x == 0) ? 31 : y;
+  return (x == 0) ? 32 : y;
 }
 
-#ifndef _MSC_VER
-#pragma GCC diagnostic pop
+#if ((defined(_MSVC_LANG) && _MSVC_LANG > 201103L) || __cplusplus > 201103L)
+  #define MAKE_UNIQUE std::make_unique
+#else
+  #define MAKE_UNIQUE open_htj2k::make_unique
+  #define[[maybe_unsed]] __attribute__((__unused__))
+#endif
+
+#if ((defined(_MSVC_LANG) && _MSVC_LANG <= 201103L) || __cplusplus <= 201103L)
+  #include <cstddef>
+  #include <memory>
+  #include <type_traits>
+  #include <utility>
+namespace open_htj2k {
+template <class T>
+struct _Unique_if {
+  typedef std::unique_ptr<T> _Single_object;
+};
+
+template <class T>
+struct _Unique_if<T[]> {
+  typedef std::unique_ptr<T[]> _Unknown_bound;
+};
+
+template <class T, size_t N>
+struct _Unique_if<T[N]> {
+  typedef void _Known_bound;
+};
+
+template <class T, class... Args>
+typename _Unique_if<T>::_Single_object make_unique(Args&&... args) {
+  return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
+}
+
+template <class T>
+typename _Unique_if<T>::_Unknown_bound make_unique(size_t n) {
+  typedef typename std::remove_extent<T>::type U;
+  return std::unique_ptr<T>(new U[n]());
+}
+
+template <class T, class... Args>
+typename _Unique_if<T>::_Known_bound make_unique(Args&&...) = delete;
+}  // namespace open_htj2k
 #endif
