@@ -67,9 +67,9 @@ void T1OJPH::preCompress([[maybe_unused]] grk::CompressBlockExec* block,
 	if(block->qmfbid == 1)
 	{
 		auto tiledp = block->tiledp;
-		for(auto j = 0U; j < h; ++j)
+		for(auto j = 0; j < h; ++j)
 		{
-			for(auto i = 0U; i < w; ++i)
+			for(auto i = 0; i < w; ++i)
 			{
 				int32_t temp = *tiledp++;
 				int32_t val = temp >= 0 ? temp : -temp;
@@ -84,9 +84,9 @@ void T1OJPH::preCompress([[maybe_unused]] grk::CompressBlockExec* block,
 	else
 	{
 		auto tiledp = block->tiledp;
-		for(auto j = 0U; j < h; ++j)
+		for(auto j = 0; j < h; ++j)
 		{
-			for(auto i = 0U; i < w; ++i)
+			for(auto i = 0; i < w; ++i)
 			{
 				int32_t t = *tiledp++ * (int32_t)(block->inv_step_ht) * (1 << shift);
 				int32_t val = t >= 0 ? t : -t;
@@ -116,8 +116,8 @@ bool T1OJPH::compress(grk::CompressBlockExec* block)
 									   pass_length, elastic_alloc, next_coded);
 
 	cblk->numPassesTotal = 1;
-	cblk->passes[0].len = (uint16_t)pass_length[0];
-	cblk->passes[0].rate = (uint16_t)pass_length[0];
+	cblk->passes[0].len = (uint32_t)pass_length[0];
+	cblk->passes[0].rate = (uint32_t)pass_length[0];
 	cblk->numbps = 1;
 	assert(cblk->paddedCompressedStream);
 	memcpy(cblk->paddedCompressedStream, next_coded->buf, (size_t)pass_length[0]);
@@ -133,24 +133,24 @@ bool T1OJPH::decompress(grk::DecompressBlockExec* block)
 	if(!cblk->seg_buffers.empty())
 	{
 		size_t total_seg_len = 2 * grk_cblk_dec_compressed_data_pad_ht + cblk->getSegBuffersLen();
-		if(coded_data_size < total_seg_len)
+		if(coded_data_size < (uint32_t)total_seg_len)
 		{
 			delete[] coded_data;
 			coded_data = new uint8_t[total_seg_len];
-			coded_data_size = total_seg_len;
+			coded_data_size = (uint32_t)total_seg_len;
 			memset(coded_data, 0, grk_cblk_dec_compressed_data_pad_ht);
 		}
 		memset(coded_data + grk_cblk_dec_compressed_data_pad_ht + (uint8_t)cblk->getSegBuffersLen(), 0,
 			   grk_cblk_dec_compressed_data_pad_ht);
 		uint8_t* actual_coded_data = coded_data + grk_cblk_dec_compressed_data_pad_ht;
-		size_t offset = 0U;
+		size_t offset = 0;
 		for(auto& b : cblk->seg_buffers)
 		{
-			memcpy(actual_coded_data + offset, b->buf, b->len * sizeof(uint8_t));
+			memcpy(actual_coded_data + offset, b->buf, b->len);
 			offset += b->len;
 		}
 
-		size_t num_passes = 0U;
+		size_t num_passes = 0;
 		for(uint32_t i = 0; i < cblk->getNumSegments(); ++i)
 		{
 			auto sgrk = cblk->getSegment(i);
@@ -162,11 +162,11 @@ bool T1OJPH::decompress(grk::DecompressBlockExec* block)
 		{
 			rc = ojph::local::ojph_decode_codeblock(
 				actual_coded_data, (uint32_t*)unencoded_data, (uint32_t)(block->k_msbs), (uint32_t)num_passes,
-				(uint32_t)offset, 0, cblk->width(), cblk->height(), cblk->width(), false);
-		}
-		else
-		{
-			memset(unencoded_data, 0, (uint16_t)cblk->width() * cblk->height() * sizeof(uint32_t));
+				(uint32_t)offset, 0, cblk->width(), cblk->height(), cblk->width(), true);
+        }
+        else
+        {
+			memset(unencoded_data, 0, cblk->width() * cblk->height() * sizeof(int32_t));
 		}
 		if(!rc)
 		{
@@ -175,7 +175,7 @@ bool T1OJPH::decompress(grk::DecompressBlockExec* block)
 		}
 	}
 
-	block->tilec->postProcessHT(unencoded_data, block, (uint16_t)cblk->width());
+	block->tilec->postProcessHT(unencoded_data, block, cblk->width());
 
 	return true;
 }
