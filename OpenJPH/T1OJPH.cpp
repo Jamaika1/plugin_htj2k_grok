@@ -112,6 +112,7 @@ bool T1OJPH::compress(grk::CompressBlockExec* block)
 	uint32_t h = cblk->height();
 
 	uint32_t pass_length[2] = {0, 0};
+	// Encoder OJPH 0.9.1 works with numpasses 1. Converter doesn't include std::jthread C++20.
 	ojph::local::ojph_encode_codeblock((uint32_t*)unencoded_data, (uint32_t)(block->k_msbs), 1, w, h, w,
 									   pass_length, elastic_alloc, next_coded);
 
@@ -160,12 +161,13 @@ bool T1OJPH::decompress(grk::DecompressBlockExec* block)
 		bool rc = false;
 		if(num_passes && offset)
 		{
+		    // Decoder OJPH 0.9.1 doesn't work with numpasses 1.
 			rc = ojph::local::ojph_decode_codeblock(
 				actual_coded_data, (uint32_t*)unencoded_data, (uint32_t)(block->k_msbs), (uint32_t)num_passes,
-				(uint32_t)offset, 0, cblk->width(), cblk->height(), cblk->width(), true);
+				(uint32_t)offset, 0, cblk->width(), cblk->height(), cblk->width(), false);
         }
-        else
-        {
+		else
+		{
 			memset(unencoded_data, 0, cblk->width() * cblk->height() * sizeof(int32_t));
 		}
 		if(!rc)
